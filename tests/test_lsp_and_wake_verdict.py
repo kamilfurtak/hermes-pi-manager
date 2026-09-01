@@ -91,10 +91,12 @@ class TestLspRunIsBestEffort(unittest.TestCase):
                                  setattr(lsp_check, "collect_touched_files", real_files)))
         self.assertIsNone(lsp_check.run("/tmp"), "a dead server yields no verdict")
 
-    def test_clean_and_dirty_summaries_read_differently(self):
-        clean = lsp_check.format_summary(
+    def test_quiet_and_dirty_summaries_read_differently(self):
+        quiet = lsp_check.format_summary(
             {"files": 3, "errors": 0, "warnings": 0, "findings": []})
-        self.assertIn("clean", clean)
+        self.assertIn("no LSP errors detected", quiet)
+        self.assertNotIn("clean", quiet,
+                         "silence from an LSP server is not a clean verdict")
         dirty = lsp_check.format_summary(
             {"files": 2, "errors": 2, "warnings": 1,
              "findings": ["a.py:7: undefined name 'foo'"]})
@@ -110,10 +112,10 @@ class TestWakeCarriesTheVerdict(unittest.TestCase):
             "execution_state": EXEC_SETTLED,
             "verification_state": VERIFY_PASS,
             "verifier_summary": "gate passed (exit 0)",
-            "lsp_summary": "LSP clean across 4 touched file(s)",
+            "lsp_summary": "no LSP errors detected in 4 touched file(s)",
         })
         self.assertIn("gate passed (exit 0)", msg)
-        self.assertIn("LSP clean", msg)
+        self.assertIn("no LSP errors detected", msg)
         self.assertIn("complete outcome", msg)
         self.assertIn("continue the parent workflow autonomously", msg)
 
@@ -224,7 +226,11 @@ class TestRegressionsFromStandaloneReview(unittest.TestCase):
                                  setattr(lsp_check, "_server_id_for", real[2])))
         res = lsp_check.run("/tmp")
         self.assertIsNotNone(res)
-        self.assertIn("clean", lsp_check.format_summary(res))
+        summary = lsp_check.format_summary(res)
+        self.assertIn("no LSP errors detected", summary)
+        self.assertNotIn("clean", summary,
+                         "a live server that returned [] proves nothing: "
+                         "upstream uses [] for 'no fresh diagnostics' too")
 
     def test_files_the_service_declines_are_reported_not_hidden(self):
         """'clean across 1 file' when two were touched reads as a verdict on
@@ -253,3 +259,42 @@ class TestRegressionsFromStandaloneReview(unittest.TestCase):
                         "pi-worker.md must be versioned with the plugin")
         self.assertEqual(core.DEFAULT_SYSTEM_PROMPT_FILE,
                          core.PACKAGED_SYSTEM_PROMPT_FILE)
+
+    def test_a_live_but_slow_server_is_not_reported_as_proof(self):
+        """Upstream's own path: the server is alive, produced no fresh
+        diagnostics within the wait budget, returns [] and is deliberately
+        NOT marked broken ("slow is not dead"). enabled_for() and
+        get_status() both still say yes, so nothing can distinguish this
+        from a genuinely clean file — the summary must not claim it is one.
+        Common on tsserver over large projects, i.e. exactly the codebases
+        where a missed type error costs the most."""
+        class SlowButAlive:
+            def enabled_for(self, path): return True
+            def get_diagnostics_sync(self, path, **kw): return []   # no fresh data
+            def get_status(self): return {"clients": [{"server_id": "typescript",
+                                                       "running": True}]}
+        real = (lsp_check._service, lsp_check.collect_touched_files,
+                lsp_check._server_id_for)
+        lsp_check._service = lambda: SlowButAlive()
+        lsp_check.collect_touched_files = lambda cwd, **kw: ["/tmp/big.ts"]
+        lsp_check._server_id_for = lambda p: "typescript"
+        self.addCleanup(lambda: (setattr(lsp_check, "_service", real[0]),
+                                 setattr(lsp_check, "collect_touched_files", real[1]),
+                                 setattr(lsp_check, "_server_id_for", real[2])))
+        summary = lsp_check.format_summary(lsp_check.run("/tmp"))
+        self.assertIsNotNone(summary)
+        self.assertNotIn("clean", summary)
+        self.assertIn("no LSP errors detected", summary)
+
+    def test_reported_errors_remain_a_blocking_signal(self):
+        """Weakening the empty case must not weaken the useful one: an error
+        the server DID report is trustworthy and must still defeat a green
+        gate in the wake."""
+        msg = format_terminal_wake_message("pi-x", {
+            "execution_state": EXEC_SETTLED,
+            "verification_state": VERIFY_PASS,
+            "verifier_summary": "gate passed (exit 0)",
+            "lsp_summary": "LSP found 1 error(s) in 1 touched file(s) — a.ts:3: nope",
+        })
+        self.assertNotIn("complete outcome", msg)
+        self.assertIn("Analyze the result", msg)

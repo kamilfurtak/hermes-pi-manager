@@ -31,8 +31,8 @@ follow-up call at all:
 
 ```
 Task `pi-abc` reached its terminal state (execution_state=SETTLED,
-verification_state=PASS). Gate: gate passed (exit 0). Semantic check: LSP
-clean across 4 touched file(s). This is the complete outcome — continue the
+verification_state=PASS). Gate: gate passed (exit 0). Semantic check: no LSP
+errors detected in 4 touched file(s). This is the complete outcome — continue the
 parent workflow autonomously without re-reading the task.
 ```
 

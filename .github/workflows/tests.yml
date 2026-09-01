@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # git identity: the touched-file collection under test shells out to
+      # git, and `git commit` refuses to run without one on a fresh runner.
+      - name: Configure git for the fixtures
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+
+      # No third-party dependencies by design: the plugin runs inside the
+      # Hermes process and must not drag its own runtime in. Each module is
+      # run separately because the suite shares module-level singletons that
+      # a single discover() run would carry between files.
+      - name: Run the test suite
+        working-directory: tests
+        run: |
+          fail=0
+          for f in test_*.py; do
+            echo "── ${f}"
+            python -m unittest "${f%.py}" || fail=1
+          done
+          exit $fail

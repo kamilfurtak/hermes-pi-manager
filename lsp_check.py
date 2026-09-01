@@ -233,13 +233,20 @@ def format_summary(result: Optional[Dict[str, Any]]) -> Optional[str]:
     warnings = int(result.get("warnings") or 0)
     skipped = int(result.get("unavailable") or 0)
     if errors == 0 and warnings == 0:
+        # NOT "clean". Upstream returns [] both for a genuinely clean file and
+        # for "the server is alive but produced no fresh diagnostics within
+        # the wait budget" — its own comment is "slow is not dead", and that
+        # path deliberately does NOT mark the server broken, so neither
+        # enabled_for() nor get_status() can tell the two apart. An empty
+        # result is therefore evidence of nothing found, never proof that
+        # nothing is there. LSP is a negative-signal detector here: errors it
+        # reports are trustworthy and blocking; silence is not an acceptance
+        # signal. The gate verdict remains the acceptance signal.
+        head = f"no LSP errors detected in {files} touched file(s)"
         if skipped:
-            # Say what was NOT checked. "clean across 2 files" when four were
-            # touched reads as a verdict on all four.
-            return (f"LSP clean across {files} touched file(s); "
-                    f"{skipped} could not be checked (no server, or it did "
-                    f"not respond)")
-        return f"LSP clean across {files} touched file(s)"
+            head += (f"; {skipped} could not be checked (no server, or it "
+                     f"did not respond)")
+        return head
     parts = []
     if errors:
         parts.append(f"{errors} error(s)")
