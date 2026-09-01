@@ -187,3 +187,69 @@ class TestVerifierVerdictCompaction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegressionsFromStandaloneReview(unittest.TestCase):
+    """Three false-confidence paths found reviewing the standalone repo."""
+
+    def test_empty_diagnostics_from_an_unavailable_server_is_not_clean(self):
+        """Upstream returns [] for "no server", "could not spawn" and
+        "timed out" as readily as for a genuinely clean file. Counting that
+        as checked would report "LSP clean" for a file nothing ever opened —
+        worse than reporting nothing at all."""
+        class Svc:
+            def enabled_for(self, path): return True
+            def get_diagnostics_sync(self, path, **kw): return []
+            def get_status(self): return {"clients": []}      # nothing running
+        real = lsp_check._service, lsp_check.collect_touched_files
+        lsp_check._service = lambda: Svc()
+        lsp_check.collect_touched_files = lambda cwd, **kw: ["/tmp/a.py"]
+        self.addCleanup(lambda: (setattr(lsp_check, "_service", real[0]),
+                                 setattr(lsp_check, "collect_touched_files", real[1])))
+        self.assertIsNone(lsp_check.run("/tmp"),
+                          "no live server means no verdict, not a clean one")
+
+    def test_empty_diagnostics_from_a_live_server_is_clean(self):
+        class Svc:
+            def enabled_for(self, path): return True
+            def get_diagnostics_sync(self, path, **kw): return []
+            def get_status(self): return {"clients": [{"server_id": "pyright",
+                                                       "running": True}]}
+        real = lsp_check._service, lsp_check.collect_touched_files, lsp_check._server_id_for
+        lsp_check._service = lambda: Svc()
+        lsp_check.collect_touched_files = lambda cwd, **kw: ["/tmp/a.py"]
+        lsp_check._server_id_for = lambda p: "pyright"
+        self.addCleanup(lambda: (setattr(lsp_check, "_service", real[0]),
+                                 setattr(lsp_check, "collect_touched_files", real[1]),
+                                 setattr(lsp_check, "_server_id_for", real[2])))
+        res = lsp_check.run("/tmp")
+        self.assertIsNotNone(res)
+        self.assertIn("clean", lsp_check.format_summary(res))
+
+    def test_files_the_service_declines_are_reported_not_hidden(self):
+        """'clean across 1 file' when two were touched reads as a verdict on
+        both. The count of unchecked files must survive into the summary."""
+        summary = lsp_check.format_summary(
+            {"files": 1, "errors": 0, "warnings": 0, "unavailable": 3,
+             "findings": []})
+        self.assertIn("could not be checked", summary)
+
+    def test_settled_without_a_gate_is_never_a_complete_outcome(self):
+        """SETTLED + NOT_RUN means nothing checked the work. Announcing it as
+        complete is the exact distinction _notify_done exists to preserve."""
+        msg = format_terminal_wake_message("pi-ungated", {
+            "execution_state": EXEC_SETTLED,
+            "verification_state": VERIFY_NOT_RUN,
+            "lsp_summary": None,
+        })
+        self.assertNotIn("complete outcome", msg)
+        self.assertIn("Analyze the result", msg)
+
+    def test_worker_policy_ships_with_the_plugin(self):
+        """A fresh install has no ~/.pi; without a packaged policy Pi would
+        run with no worker contract at all, silently."""
+        import core  # type: ignore
+        self.assertTrue(core.PACKAGED_SYSTEM_PROMPT_FILE.is_file(),
+                        "pi-worker.md must be versioned with the plugin")
+        self.assertEqual(core.DEFAULT_SYSTEM_PROMPT_FILE,
+                         core.PACKAGED_SYSTEM_PROMPT_FILE)

@@ -153,7 +153,14 @@ DERIVED_GATE_UNRUNNABLE = "GATE_UNRUNNABLE"
 # leaf implementer. Callers may override it via the explicit
 # ``system_prompt_file`` parameter, and its absence must never fail task
 # startup — it is simply omitted from argv in that case.
-DEFAULT_SYSTEM_PROMPT_FILE = Path.home() / ".pi" / "agent" / "prompts" / "pi-worker.md"
+# The leaf-worker policy ships WITH the plugin: a policy that does not match
+# the manager's expectations is worse than none, and a fresh install has no
+# reason to already carry a file under ~/.pi. Versioning them together means
+# the worker contract can never silently drift from the code that relies on
+# it. There is deliberately no ~/.pi fallback: two sources for one policy is
+# the drift this packaging exists to remove.
+PACKAGED_SYSTEM_PROMPT_FILE = Path(__file__).with_name("pi-worker.md")
+DEFAULT_SYSTEM_PROMPT_FILE = PACKAGED_SYSTEM_PROMPT_FILE
 
 # Events that never mean forward progress alone (handled specially) vs the
 # generic "any event refreshes last_progress_at" rule.
@@ -400,8 +407,12 @@ def format_terminal_wake_message(task_id: str, row: Dict[str, Any]) -> str:
         # letting silence read as "clean".
         lines.append("Semantic check: not available for this task.")
 
+    # SETTLED + NOT_RUN is NOT done. _notify_done exists precisely to avoid
+    # announcing "finished" without saying whether the gate passed, and an
+    # ungated task never reached a verdict about its work. Only an actually
+    # passing gate, with no semantic errors, earns the no-follow-up path.
     clean = (execution_state == EXEC_SETTLED
-             and verification_state in (VERIFY_PASS, VERIFY_NOT_RUN)
+             and verification_state == VERIFY_PASS
              and not (lsp or "").startswith("LSP found"))
     if clean:
         lines.append(

@@ -107,6 +107,34 @@ def _service() -> Optional[Any]:
         return None
 
 
+def _server_id_for(path: str) -> Optional[str]:
+    """Which language server would handle this file, if any."""
+    try:
+        from agent.lsp.servers import find_server_for_file  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        srv = find_server_for_file(path)
+        return getattr(srv, "server_id", None) if srv else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _running_server_ids(svc: Any) -> Optional[set]:
+    """Server ids with a live client, or None when that cannot be determined."""
+    try:
+        status = svc.get_status() or {}
+    except Exception:  # noqa: BLE001
+        return None
+    clients = status.get("clients")
+    if clients is None:
+        return None
+    try:
+        return {c.get("server_id") for c in clients if c.get("running")}
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run(cwd: Optional[str], *, limit: int = MAX_FILES,
         budget_seconds: float = MAX_SECONDS,
         clock: Any = None) -> Optional[Dict[str, Any]]:
@@ -131,7 +159,7 @@ def run(cwd: Optional[str], *, limit: int = MAX_FILES,
         return None
 
     deadline = now() + budget_seconds
-    errors = warnings = 0
+    errors = warnings = unavailable = 0
     findings: List[str] = []
     checked = 0
     truncated = False
@@ -140,15 +168,35 @@ def run(cwd: Optional[str], *, limit: int = MAX_FILES,
         if now() >= deadline:
             truncated = True
             break
+        # An empty diagnostics list is NOT proof of a clean file: upstream
+        # returns [] for "disabled", "no workspace", "no server matched",
+        # "server could not spawn" and "timed out" as well. enabled_for()
+        # rules out the first three; a live client for this file's server
+        # rules out the rest. Anything we cannot positively confirm is
+        # counted as unchecked, because reporting "clean" for a file no
+        # server ever opened is the one failure mode that would make this
+        # signal worse than having none.
         try:
-            # delta=False: we want the file's real state, not "what this edit
-            # introduced" — there was no edit by Hermes to diff against.
+            if not svc.enabled_for(path):
+                unavailable += 1
+                continue
+        except Exception:  # noqa: BLE001
+            unavailable += 1
+            continue
+        try:
             diags = svc.get_diagnostics_sync(
                 path, delta=False, timeout=max(1.0, deadline - now()),
             ) or []
         except Exception as exc:  # noqa: BLE001 - never let LSP break a verdict
             logger.debug("pi-manager: LSP check failed for %s: %s", path, exc)
+            unavailable += 1
             continue
+        if not diags:
+            running = _running_server_ids(svc)
+            sid = _server_id_for(path)
+            if running is None or sid is None or sid not in running:
+                unavailable += 1
+                continue
         checked += 1
         rel = os.path.relpath(path, cwd) if cwd else path
         for d in diags:
@@ -170,6 +218,7 @@ def run(cwd: Optional[str], *, limit: int = MAX_FILES,
         "files": checked,
         "errors": errors,
         "warnings": warnings,
+        "unavailable": unavailable,
         "findings": findings,
         "truncated": truncated,
     }
@@ -182,7 +231,14 @@ def format_summary(result: Optional[Dict[str, Any]]) -> Optional[str]:
     files = result.get("files", 0)
     errors = int(result.get("errors") or 0)
     warnings = int(result.get("warnings") or 0)
+    skipped = int(result.get("unavailable") or 0)
     if errors == 0 and warnings == 0:
+        if skipped:
+            # Say what was NOT checked. "clean across 2 files" when four were
+            # touched reads as a verdict on all four.
+            return (f"LSP clean across {files} touched file(s); "
+                    f"{skipped} could not be checked (no server, or it did "
+                    f"not respond)")
         return f"LSP clean across {files} touched file(s)"
     parts = []
     if errors:
@@ -193,6 +249,8 @@ def format_summary(result: Optional[Dict[str, Any]]) -> Optional[str]:
     findings = result.get("findings") or []
     if findings:
         head += " — " + "; ".join(findings)
+    if skipped:
+        head += f"; {skipped} file(s) could not be checked"
     if result.get("truncated"):
         head += " [scan truncated by budget]"
     return head
