@@ -45,13 +45,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
-    from .core import PiManager, Thresholds, VerifierSpec, EXEC_SETTLED  # type: ignore
+    from .core import (  # type: ignore
+        PiManager, Thresholds, VerifierSpec, EXEC_SETTLED, HOST_RUNTIME_ID,
+    )
     from .outbox import NotificationOutbox, OutboxWorker  # type: ignore
     from .registry_db import Registry, default_db_path  # type: ignore
     from .rpc_transport import find_pi_binary  # type: ignore
     from .wake_worker import TerminalWakeWorker  # type: ignore
 except ImportError:  # pragma: no cover - standalone/test import (no package)
-    from core import PiManager, Thresholds, VerifierSpec, EXEC_SETTLED
+    from core import (
+        PiManager, Thresholds, VerifierSpec, EXEC_SETTLED, HOST_RUNTIME_ID,
+    )
     from outbox import NotificationOutbox, OutboxWorker
     from registry_db import Registry, default_db_path
     from rpc_transport import find_pi_binary
@@ -145,9 +149,18 @@ def _capture_routing() -> Dict[str, Any]:
     gateway.session_context API.
 
     Best effort: empty values are omitted, and a CLI process legitimately
-    yields almost nothing (its notifications then fail permanently with a
-    readable reason instead of being dropped silently). Only serializable
-    strings are stored — never a context or session object.
+    yields almost nothing from the session context (its notifications then
+    fail permanently with a readable reason instead of being dropped
+    silently). Only serializable strings are stored — never a context or
+    session object.
+
+    ``host_runtime_id`` is always stamped, and is the ONLY field an
+    interactive CLI reliably contributes: measured on this Hermes build,
+    a plain ``hermes`` run leaves HERMES_SESSION_KEY, HERMES_SESSION_SOURCE
+    and HERMES_UI_SESSION_ID all unset (HERMES_SESSION_SOURCE is exported
+    only by an explicit ``--source`` flag), so ``source`` is recorded for
+    audit but cannot be used to recognise the surface. It is the stamp that
+    makes a local wake addressable back to the process that can serve it.
     """
     out: Dict[str, Any] = {}
     try:
@@ -158,6 +171,7 @@ def _capture_routing() -> Dict[str, Any]:
             ("thread_id", "HERMES_SESSION_THREAD_ID"),
             ("message_id", "HERMES_SESSION_MESSAGE_ID"),
             ("session_key", "HERMES_SESSION_KEY"),
+            ("source", "HERMES_SESSION_SOURCE"),
             ("scope_id", "HERMES_SESSION_SCOPE_ID"),
             ("user_id", "HERMES_SESSION_USER_ID"),
             ("user_name", "HERMES_SESSION_USER_NAME"),
@@ -178,6 +192,10 @@ def _capture_routing() -> Dict[str, Any]:
                 out["platform"] = str(value)
         except Exception:
             pass
+    # Unconditional, and last so nothing above can shadow it: the wake
+    # worker needs to know which process dispatched the task even when the
+    # session context yielded nothing at all.
+    out["host_runtime_id"] = HOST_RUNTIME_ID
     return out
 
 

@@ -42,6 +42,7 @@ from test_pi_manager import (  # type: ignore
 )
 import registry_db  # type: ignore
 from core import (  # type: ignore
+    HOST_RUNTIME_ID,
     PiManager,
     VerifierSpec,
     VERIFY_FAIL,
@@ -67,6 +68,12 @@ ORIGIN = {
     "user_id": "u1",
 }
 SESSION_KEY = ORIGIN["session_key"]
+
+# What an interactive CLI actually produces: the session context yields
+# nothing (no session_key, no source, no ui id — measured on this Hermes
+# build), so the host_runtime_id stamp is the whole snapshot.
+LOCAL_ORIGIN = {"host_runtime_id": HOST_RUNTIME_ID}
+FOREIGN_ORIGIN = {"host_runtime_id": "0" * 32}
 
 _NEW_WAKE_COLUMNS = {
     "continuation_enabled", "wake_state", "wake_attempts",
@@ -173,11 +180,22 @@ class TestRegistryMigrationAndDefaults(PiManagerTestCase):
         self.assertIsNone(row["wake_accepted_at"])
         self.assertIsNone(row["wake_last_error"])
 
-    def test_cli_task_defaults_disabled(self):
+    def test_task_without_any_origin_defaults_disabled(self):
+        """No session_key AND no host_runtime_id: nothing to wake."""
         manager = self.make_manager(FakePiProcess())
         result = manager.start_task(prompt="p", cwd=str(self.cwd_dir))
         row = self.registry.get_task(result["task_id"])
         self.assertEqual(row["continuation_enabled"], 0)
+
+    def test_local_cli_task_with_host_runtime_id_defaults_enabled(self):
+        """The interactive-CLI route: no session_key, but the dispatching
+        process stamped itself, so inject_message's _cli_ref branch can
+        deliver the wake back into that same CLI."""
+        manager = self.make_manager(FakePiProcess())
+        result = manager.start_task(
+            prompt="p", cwd=str(self.cwd_dir), origin=dict(LOCAL_ORIGIN))
+        row = self.registry.get_task(result["task_id"])
+        self.assertEqual(row["continuation_enabled"], 1)
 
     def test_telegram_task_with_valid_session_key_defaults_enabled(self):
         manager = self.make_manager(FakePiProcess())
@@ -482,6 +500,78 @@ class TestTerminalWakeWorker(_OutboxManagerCase):
         worker = self._worker(ctx)
         self.assertEqual(worker.run_once(now=self.clock()), 0)
         self.assertEqual(ctx.injects, [])
+
+    def test_local_wake_dispatches_with_session_key_none(self):
+        """The interactive-CLI path end to end at the worker boundary.
+
+        The task carries no session_key, so the worker must call the public
+        inject_message with session_key=None and let the host take its
+        _cli_ref -> _pending_input branch (which is checked BEFORE the
+        session_key requirement in hermes_cli/plugins.py).
+        """
+        ctx = FakePluginContext()
+        task_id = self._wake("pi-local", origin=LOCAL_ORIGIN)
+        worker = self._worker(ctx)
+        self.assertEqual(worker.run_once(now=self.clock()), 1)
+
+        self.assertEqual(len(ctx.injects), 1)
+        inj = ctx.injects[0]
+        self.assertIsNone(inj["session_key"],
+                          "a local wake must pass session_key=None, not a fabricated key")
+        self.assertEqual(inj["role"], "user")
+        self.assertIn(continuation_id_for(task_id), inj["content"])
+
+        row = self.registry.get_task(task_id)
+        self.assertEqual(row["wake_state"], "accepted")
+        self.assertEqual(row["wake_attempts"], 1)
+
+    def test_local_wake_is_left_alone_by_a_foreign_worker(self):
+        """The registry is shared by every Hermes process, and each runs its
+        own worker. A local wake is deliverable ONLY inside the process that
+        dispatched it; a foreign worker must not claim it, or five foreign
+        ticks would exhaust the budget before the owning CLI got one."""
+        ctx = FakePluginContext()
+        task_id = self._wake("pi-foreign", origin=FOREIGN_ORIGIN)
+        worker = self._worker(ctx)
+        self.assertEqual(worker.run_once(now=self.clock()), 0)
+
+        self.assertEqual(ctx.injects, [], "a foreign process must not inject")
+        row = self.registry.get_task(task_id)
+        self.assertEqual(row["wake_state"], "pending",
+                         "the wake stays available for its owner")
+        self.assertEqual(row["wake_attempts"], 0,
+                         "no attempt may be spent by a process that cannot deliver")
+
+    def test_gateway_wake_is_served_by_any_process(self):
+        """A session_key wake goes through the gateway, which any process
+        holding it may serve — the runtime stamp must not narrow that."""
+        ctx = FakePluginContext()
+        origin = dict(ORIGIN, host_runtime_id="0" * 32)
+        task_id = self._wake("pi-gw-any", origin=origin)
+        self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 1)
+        self.assertEqual(ctx.injects[0]["session_key"], SESSION_KEY)
+        self.assertEqual(self.registry.get_task(task_id)["wake_state"], "accepted")
+
+    def test_orphaned_local_wake_is_retired_after_the_deadline(self):
+        """The owning process died with the wake undelivered. Nobody else
+        can serve it, so it must not sit 'pending' forever."""
+        ctx = FakePluginContext()
+        task_id = self._wake("pi-orphan", origin=FOREIGN_ORIGIN)
+        worker = self._worker(ctx, local_wake_orphan_seconds=1800.0)
+
+        self.clock.advance(1799)
+        self.assertEqual(worker.run_once(now=self.clock()), 0)
+        self.assertEqual(self.registry.get_task(task_id)["wake_state"], "pending")
+
+        self.clock.advance(2)
+        self.assertEqual(worker.run_once(now=self.clock()), 0)
+        row = self.registry.get_task(task_id)
+        self.assertEqual(row["wake_state"], "exhausted")
+        self.assertIn("orphaned", row["wake_last_error"])
+        self.assertEqual(ctx.injects, [])
+        events = [e for e in self.registry.recent_events(task_id, limit=100)
+                  if e["event_type"] == "wake_orphaned"]
+        self.assertEqual(len(events), 1)
 
     def test_dispatching_surviving_restart_is_uncertain_and_never_retried(self):
         """Crash safety: a worker that claimed the wake and died before

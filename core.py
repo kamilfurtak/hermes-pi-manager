@@ -343,6 +343,24 @@ def format_notification_message(kind: str, task_id: str, row: Dict[str, Any]) ->
 # pi_digest is where the work itself is summarized.
 # ---------------------------------------------------------------------------
 
+# Identity of THIS Hermes process, minted once per interpreter.
+#
+# The registry is shared by every process that loads the plugin (gateway,
+# each desktop/ACP backend, every interactive CLI), and each of them runs
+# its own TerminalWakeWorker against it. A gateway-routed wake carries an
+# origin.session_key and can be served by whichever process holds the live
+# gateway. A LOCAL wake (interactive CLI: no session_key, delivery goes
+# through PluginContext._cli_ref) can only ever be served by the exact
+# process that dispatched it — any other worker would call inject_message
+# with no CLI reference and no session key, burning the retry budget on a
+# delivery it structurally cannot perform, and possibly starving the one
+# process that could. Stamping the origin with this value lets the worker
+# tell "mine" from "someone else's" without reaching into Hermes internals.
+#
+# A random id (not the pid) on purpose: pids are reused after a restart,
+# and a recycled pid must never let a fresh process adopt a dead one's wake.
+HOST_RUNTIME_ID = uuid.uuid4().hex
+
 
 def continuation_id_for(task_id: str) -> str:
     """The task's single continuation id. Derived, not stored, so the wake
@@ -686,12 +704,22 @@ class PiManager:
             # back after settlement, possibly after a manager restart.
             origin=bound(json.dumps(origin or {}, ensure_ascii=False, default=str), 2000)
             if origin else None,
-            # Terminal continuation wake eligibility: a task dispatched
-            # from a gateway/Telegram session (a valid origin.session_key)
-            # may resume its orchestrator session ONCE at a terminal state.
-            # Everything else (CLI, TUI, no/invalid session key) stays
-            # wake-disabled; existing rows default to 0 via the schema.
-            continuation_enabled=1 if _safe_ref((origin or {}).get("session_key")) else 0,
+            # Terminal continuation wake eligibility. Two routes reach a
+            # live orchestrator, and a task qualifies on either one:
+            #   - origin.session_key: a gateway/Telegram session, resumed by
+            #     PluginContext.inject_message's gateway path;
+            #   - origin.host_runtime_id: the dispatching process itself,
+            #     resumed by inject_message's _cli_ref path (session_key is
+            #     None there — the CLI branch is checked first and never
+            #     consults it). Only that same process may serve the wake;
+            #     the worker enforces it.
+            # A task with no origin snapshot at all (no session_key, no
+            # runtime id) stays wake-disabled; existing rows default to 0
+            # via the schema.
+            continuation_enabled=1 if (
+                _safe_ref((origin or {}).get("session_key"))
+                or _safe_ref((origin or {}).get("host_runtime_id"))
+            ) else 0,
         )
         self._record_event(task_id, "manager", "task_created", None, EXEC_STARTING,
                             summary={"cwd": cwd, "session_file": session_file,

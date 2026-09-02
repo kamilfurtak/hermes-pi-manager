@@ -23,6 +23,7 @@ from test_pi_manager import (  # type: ignore
     wait_until,
 )
 import tools  # type: ignore  (path setup happens inside test_pi_manager)
+import core  # type: ignore
 from core import PiManager  # type: ignore
 from outbox import NotificationOutbox  # type: ignore
 from registry_db import Registry  # type: ignore
@@ -87,13 +88,30 @@ class TestCaptureRouting(unittest.TestCase):
         ):
             self.assertEqual(routing.get(key), GATEWAY_ENV[env], key)
 
-    def test_cli_process_yields_nothing_without_raising(self):
+    def test_cli_process_yields_only_the_host_runtime_stamp(self):
+        """An interactive CLI contributes nothing to the session context.
+
+        Measured on this Hermes build: a plain ``hermes`` run leaves
+        HERMES_SESSION_KEY, HERMES_SESSION_SOURCE and HERMES_UI_SESSION_ID
+        all unset. The host_runtime_id stamp is therefore the ONLY thing
+        that can make such a task's wake addressable, which is exactly why
+        it is unconditional.
+        """
         saved = _install_fake_gateway({})
         self.addCleanup(lambda: _restore_gateway(saved))
         saved_platform = os.environ.pop("HERMES_PLATFORM", None)
         self.addCleanup(lambda: os.environ.__setitem__("HERMES_PLATFORM", saved_platform)
                         if saved_platform is not None else None)
-        self.assertEqual(tools._capture_routing(), {})
+        routing = tools._capture_routing()
+        self.assertEqual(routing, {"host_runtime_id": core.HOST_RUNTIME_ID})
+
+    def test_source_is_captured_when_the_host_provides_one(self):
+        saved = _install_fake_gateway({"HERMES_SESSION_SOURCE": "cli"})
+        self.addCleanup(lambda: _restore_gateway(saved))
+        saved_platform = os.environ.pop("HERMES_PLATFORM", None)
+        self.addCleanup(lambda: os.environ.__setitem__("HERMES_PLATFORM", saved_platform)
+                        if saved_platform is not None else None)
+        self.assertEqual(tools._capture_routing().get("source"), "cli")
 
     def test_hermes_platform_env_is_a_fallback_only(self):
         saved = _install_fake_gateway({})
