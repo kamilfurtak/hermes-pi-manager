@@ -220,7 +220,25 @@ class TerminalWakeWorker:
         """
         origin = parse_origin(row.get("origin"))
         if origin.get("session_key"):
-            return True
+            # Gateway wake. Any process holding a LIVE gateway may serve it
+            # (the session store is durable, so a restarted gateway serves an
+            # older wake fine) — but a process without one must keep its hands
+            # off. Two distinct failures come from letting it through:
+            #
+            #   - an ACP/desktop backend or the web UI has neither a gateway
+            #     nor a CLI reference, so its inject_message returns False and
+            #     spends an attempt from the shared bounded budget;
+            #   - a CLI process is WORSE than useless: inject_message checks
+            #     _cli_ref FIRST and returns True without ever looking at
+            #     session_key, so the wake is reported accepted (terminal, no
+            #     retry) after landing in a terminal that never asked for it.
+            #     Observed 2026-09-02: a desktop task's wake was answered in
+            #     an unrelated CLI while the desktop session sat silent.
+            #
+            # When the host cannot be probed, fall through to the historical
+            # first-come behaviour: unknown must never be less capable than
+            # the code this replaces.
+            return self._gateway_injector_live() is not False
         owner = origin.get("host_runtime_id")
         if owner == HOST_RUNTIME_ID:
             return True
@@ -287,6 +305,27 @@ class TerminalWakeWorker:
             self._event(task_id, "wake_exhausted", {
                 "attempts": attempts, "error": error,
             })
+
+    def _gateway_injector_live(self) -> Optional[bool]:
+        """Whether THIS process holds a live gateway injector.
+
+        ``PluginManager.has_gateway_message_injector`` is a public property
+        and is exactly the flag ``inject_message`` itself consults before
+        taking its gateway branch; the manager is reached through the
+        context's private handle because the plugin API exposes no surface
+        accessor. Read-only and fail-soft on purpose: any breakage in that
+        traversal returns None ("cannot tell"), which the caller treats as
+        the historical permissive behaviour rather than as a refusal, so a
+        host that renames or hides the attribute loses the optimisation
+        instead of losing its wakes.
+        """
+        manager = getattr(self._ctx, "_manager", None)
+        if manager is None:
+            return None
+        try:
+            return bool(manager.has_gateway_message_injector)
+        except Exception:
+            return None
 
     def _event(self, task_id: str, event_type: str, summary: Dict[str, Any]) -> None:
         # Every wake event names the process that produced it. The registry

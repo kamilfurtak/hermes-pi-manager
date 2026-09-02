@@ -102,6 +102,40 @@ class FakePluginContext:
         return self._behavior
 
 
+class _FakeManager:
+    """The one PluginManager attribute the worker probes."""
+
+    def __init__(self, has_injector: bool) -> None:
+        self.has_gateway_message_injector = has_injector
+
+
+class HostedFakePluginContext(FakePluginContext):
+    """FakePluginContext that also models the host it is attached to.
+
+    ``_manager`` mirrors the real PluginContext handle the worker reads to
+    decide whether THIS process can serve a gateway wake.
+    """
+
+    def __init__(self, *, gateway: bool) -> None:
+        super().__init__()
+        self._manager = _FakeManager(gateway)
+
+
+class CliHostFakePluginContext(HostedFakePluginContext):
+    """A CLI host: no gateway injector, and inject_message ALWAYS returns
+    True because the real one checks _cli_ref before session_key. This is
+    the shape that silently swallowed another surface's wake."""
+
+    def __init__(self) -> None:
+        super().__init__(gateway=False)
+
+    def inject_message(self, content: str, role: str = "user", *,
+                       session_key=None) -> bool:
+        self.injects.append({"content": content, "role": role,
+                             "session_key": session_key})
+        return True
+
+
 class _OutboxManagerCase(PiManagerTestCase):
     """PiManagerTestCase + a durable outbox and the wake worker helpers."""
 
@@ -550,6 +584,61 @@ class TestTerminalWakeWorker(_OutboxManagerCase):
         task_id = self._wake("pi-gw-any", origin=origin)
         self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 1)
         self.assertEqual(ctx.injects[0]["session_key"], SESSION_KEY)
+        self.assertEqual(self.registry.get_task(task_id)["wake_state"], "accepted")
+
+    def test_cli_host_never_swallows_a_gateway_wake(self):
+        """Regression, observed live on 2026-09-02: a desktop task's wake was
+        claimed by an unrelated interactive CLI, which reported it accepted
+        (terminal — never retried) after delivering it into a terminal that
+        never dispatched the task, while the originating session stayed
+        silent. A CLI host has no gateway injector, so it must not claim a
+        gateway wake at all — its inject_message would return True for one."""
+        ctx = CliHostFakePluginContext()
+        task_id = self._wake("pi-cross-surface")
+        worker = self._worker(ctx)
+
+        self.assertEqual(worker.run_once(now=self.clock()), 0)
+        self.assertEqual(ctx.injects, [],
+                         "a CLI must never receive another surface's wake")
+        row = self.registry.get_task(task_id)
+        self.assertEqual(row["wake_state"], "pending",
+                         "the wake stays available for a real gateway host")
+        self.assertEqual(row["wake_attempts"], 0)
+
+    def test_gateway_wake_refused_where_no_injector_is_live(self):
+        """An ACP/desktop backend or web UI can only burn the shared retry
+        budget on a gateway wake, so it must not claim one."""
+        ctx = HostedFakePluginContext(gateway=False)
+        task_id = self._wake("pi-no-injector")
+        self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 0)
+        self.assertEqual(ctx.injects, [])
+        row = self.registry.get_task(task_id)
+        self.assertEqual(row["wake_state"], "pending")
+        self.assertEqual(row["wake_attempts"], 0)
+
+    def test_gateway_wake_served_where_the_injector_is_live(self):
+        ctx = HostedFakePluginContext(gateway=True)
+        task_id = self._wake("pi-with-injector")
+        self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 1)
+        self.assertEqual(ctx.injects[0]["session_key"], SESSION_KEY)
+        self.assertEqual(self.registry.get_task(task_id)["wake_state"], "accepted")
+
+    def test_unprobeable_host_keeps_the_historical_behaviour(self):
+        """Fail-soft: a context whose manager cannot be read must not lose
+        its wakes — unknown falls back to first-come, as before."""
+        ctx = FakePluginContext()
+        self.assertIsNone(self._worker(ctx)._gateway_injector_live())
+        task_id = self._wake("pi-unprobeable")
+        self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 1)
+        self.assertEqual(self.registry.get_task(task_id)["wake_state"], "accepted")
+
+    def test_local_wake_still_served_by_its_owner_without_a_gateway(self):
+        """The CLI path must stay unaffected: a local wake has no
+        session_key, so the gateway-injector rule never applies to it."""
+        ctx = CliHostFakePluginContext()
+        task_id = self._wake("pi-local-cli-host", origin=LOCAL_ORIGIN)
+        self.assertEqual(self._worker(ctx).run_once(now=self.clock()), 1)
+        self.assertIsNone(ctx.injects[0]["session_key"])
         self.assertEqual(self.registry.get_task(task_id)["wake_state"], "accepted")
 
     def test_orphaned_local_wake_is_retired_after_the_deadline(self):
