@@ -396,14 +396,7 @@ def handle_pi_task(args: Dict[str, Any], **_kw) -> str:
     )
     if result.get("task_id") and cli_host.is_cli(origin):
         if cli_host.ensure_monitor(manager):
-            result["cli_live_view"] = {
-                "presentation": "native-subagent-monitor",
-                "instruction": "The native Subagents panel already confirms startup and shows progress. "
-                               "End this turn without a separate startup/status message or task_id "
-                               "acknowledgement, unless the user explicitly requested one. "
-                               "Do not poll pi_status or generate progress turns. "
-                               "The terminal result will resume this conversation automatically.",
-            }
+            result["cli_live_view"] = cli_host.startup_view(origin)
     if (result.get("task_id") and (origin.get("ui_session_id")
             or origin.get("source") in ("desktop", "tui"))):
         task_id = str(result["task_id"])

@@ -111,6 +111,61 @@ class TestCLIDelivery(OutboxTestCase):
             self.worker.run_once()
             self.assertIn('błąd procesu', self.prints[0][0][0])
 
+    def test_quiet_start_attaches_on_ui_loop_once_and_releases_after_the_dispatch_turn(self):
+        from unittest.mock import Mock
+        from cli_startup import ACKNOWLEDGEMENT
+        self.cli.agent = SimpleNamespace(stream_delta_callback=None, _stream_callback=None)
+        self.cli._agent_running = True
+        self.cli._chat_render_turn = renderer = Mock()
+        self.cli._flush_stream = Mock()
+        monitor = SimpleNamespace(cli=self.cli, closed=False)
+        with patch.object(cli_host, '_monitor', monitor), patch.object(cli_host, '_quiet_start', None):
+            view = cli_host.startup_view(self.origin)
+            self.assertTrue(view['quiet_start'])
+            self.assertEqual(view['reply'], ACKNOWLEDGEMENT)
+            installed = self.cli._chat_render_turn
+            self.assertEqual(cli_host.startup_view(self.origin), view)
+            self.assertIs(self.cli._chat_render_turn, installed, 'parallel starts must not stack filters')
+            quiet = cli_host._quiet_start
+            try:
+                async def finish():
+                    self.cli._chat_render_turn(SimpleNamespace(result={
+                        'completed': True, 'final_response': view['reply']}), None, None)
+                asyncio.run_coroutine_threadsafe(finish(), self.app.loop).result(3)
+                self.assertTrue(quiet.closed)
+                self.assertIsNone(cli_host._quiet_start, 'do not retain the finished parent agent')
+                self.assertIs(self.cli._chat_render_turn, renderer)
+            finally:
+                quiet.close()
+
+    def test_quiet_start_falls_back_when_the_host_cannot_render_it(self):
+        monitor = SimpleNamespace(cli=self.cli, closed=False)
+        with patch.object(cli_host, '_monitor', monitor), patch.object(cli_host, '_quiet_start', None):
+            for origin in (self.origin, dict(self.origin, platform='telegram'),
+                           dict(self.origin, cli_session_id='foreign')):
+                view = cli_host.startup_view(origin)
+                self.assertNotIn('quiet_start', view)
+                self.assertNotIn('reply', view)
+                self.assertIsNone(cli_host._quiet_start)
+
+    def test_timed_out_startup_attachment_does_not_leak_into_the_next_turn(self):
+        from unittest.mock import Mock
+        from concurrent.futures import Future, TimeoutError
+        self.cli.agent = SimpleNamespace(stream_delta_callback=None, _stream_callback=None)
+        self.cli._chat_render_turn = renderer = Mock()
+        self.cli._flush_stream = Mock()
+        pending = []
+        ready = Future()
+        with patch.object(cli_host, '_monitor', SimpleNamespace(cli=self.cli, closed=False)), patch.object(
+                cli_host, '_quiet_start', None), patch.object(self.app.loop, 'call_soon_threadsafe', pending.append), patch(
+                'concurrent.futures.Future', return_value=ready), patch.object(ready, 'result', side_effect=TimeoutError):
+            view = cli_host.startup_view(self.origin)
+            self.assertNotIn('quiet_start', view)
+            self.assertTrue(ready.cancelled())
+            pending[0]()
+            self.assertIsNone(cli_host._quiet_start)
+            self.assertIs(self.cli._chat_render_turn, renderer)
+
     def test_wake_uses_fifo_preserves_draft_and_never_interrupts_busy_parent(self):
         consumed = []
         self.cli._tui_process_one_input = consumed.append

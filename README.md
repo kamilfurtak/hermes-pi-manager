@@ -178,9 +178,15 @@ the roster, **Enter** opens the selected live tail, **Esc** returns, and **F7**
 collapses the dock. Native subagents retain their original rows and controls.
 **s** queues guidance to Pi; **x**, then the native confirmation, stops it.
 Opening/closing the viewer preserves the composer draft and does not stop Pi.
-After successful attachment, `pi_task` tells the parent to end its turn without
-a separate startup acknowledgement, unless the user explicitly requested one.
-Older hosts retain the normal acknowledgement when attachment is unavailable.
+After successful attachment, `pi_task` supplies a short, nonempty acknowledgement
+that the CLI presents through the dock instead of a separate response box. Empty
+model replies trigger Hermes' retry guard, so the model still ends its turn with
+the supplied text. A reversible adapter consumes only that exact acknowledgement
+in the dispatching turn, including streamed tokens; history retains it. Other
+answers, errors, explicit task-ID requests and the terminal continuation remain
+ordinary responses. Bindings are released after the turn, including interruption.
+Older hosts and voice/TTS retain a short visible acknowledgement when quiet
+presentation is unavailable. This does not change Hermes' conversation loop.
 The native spinner refreshes activity about once a second even while the parent
 is idle or working on another request. Once no agents remain it stops repainting
 the idle prompt. No model turn is used for monitoring.

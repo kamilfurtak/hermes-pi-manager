@@ -12,6 +12,7 @@ from typing import Any
 _manager: Any = None
 _runtime_id = ""
 _monitor = None
+_quiet_start = None
 
 
 def bind(ctx: Any, runtime_id: str) -> None:
@@ -118,7 +119,22 @@ def ensure_monitor(manager) -> bool:
 
 
 def stop_monitor():
-    global _monitor
+    global _monitor, _quiet_start
+    quiet, _quiet_start = _quiet_start, None
+    if quiet is not None:
+        def close_quiet():
+            try:
+                quiet.close()
+            except Exception:
+                pass
+        loop = getattr(getattr(quiet.cli, '_app', None), 'loop', None)
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(close_quiet)
+            except RuntimeError:
+                close_quiet()
+        else:
+            close_quiet()
     monitor, _monitor = _monitor, None
     if monitor is not None:
         loop = getattr(monitor.cli._app, 'loop', None)
@@ -127,6 +143,84 @@ def stop_monitor():
                 loop.call_soon_threadsafe(monitor.close)
             except RuntimeError:
                 pass
+
+
+def startup_view(origin: dict) -> dict:
+    """Arm quiet presentation only for the current CLI turn and native dock."""
+    global _quiet_start
+    view = {
+        'presentation': 'native-subagent-monitor',
+        'instruction': 'The native Subagents panel shows startup and progress. '
+                       'If only waiting for Pi, end this turn with one short acknowledgement; '
+                       'do not return an empty response. Do not poll pi_status or generate progress turns. '
+                       'The terminal result will resume this conversation automatically.',
+    }
+    target = _target(origin, idle=False)
+    if target is None or _monitor is None or _monitor.closed or _monitor.cli is not target[0]:
+        return view
+    cli, _, loop = target
+    agent = getattr(cli, 'agent', None)
+
+    def release(quiet):
+        global _quiet_start
+        if _quiet_start is quiet:
+            _quiet_start = None
+
+    def attach():
+        global _quiet_start
+        try:
+            try:
+                from .cli_startup import ACKNOWLEDGEMENT, QuietStart
+            except ImportError:
+                from cli_startup import ACKNOWLEDGEMENT, QuietStart
+            if (getattr(cli, 'agent', None) is not agent
+                    or not owns(cli, origin) or not QuietStart.supported(cli)):
+                return None
+            if _quiet_start is None or not _quiet_start.current():
+                if _quiet_start is not None:
+                    _quiet_start.close()
+                _quiet_start = QuietStart(cli, lambda: owns(cli, origin), on_close=release)
+                _quiet_start.attach()
+            return ACKNOWLEDGEMENT
+        except Exception:
+            return None
+
+    try:
+        from concurrent.futures import Future
+        ready = Future()
+        try:
+            same_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            same_loop = False
+        if same_loop:
+            reply = attach()
+        else:
+            def queued_attach():
+                # A timed-out tool must not attach a turn-specific filter later,
+                # after the caller has already fallen back to an ordinary reply.
+                if ready.set_running_or_notify_cancel():
+                    ready.set_result(attach())
+            loop.call_soon_threadsafe(queued_attach)
+            try:
+                reply = ready.result(timeout=2)
+            except Exception:
+                ready.cancel()
+                raise
+        if reply:
+            view.update(quiet_start=True, reply=reply)
+            view['instruction'] = (
+                'The native Subagents panel already confirms startup and shows progress. '
+                'If only waiting for Pi, finish this turn with exactly the supplied reply field '
+                'as plain text, without additional text. Do not return an empty response: Hermes '
+                'would retry it. The CLI presents that acknowledgement in the Subagents panel '
+                'without a separate startup/status message. If the user explicitly requested '
+                'a task_id or startup report, answer that request normally instead of using the '
+                'supplied reply. Continue any independent work normally. Do not poll pi_status '
+                'or generate progress turns. The terminal result will resume this conversation automatically.'
+            )
+    except Exception:
+        pass  # A view failure cannot change the already-started task's result.
+    return view
 
 
 def available(origin: dict) -> bool:

@@ -39,6 +39,11 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
   Pi ma zniknąć z panelu. Nie powinno być wielokrotnych prób drukowania nad
   otwartym podglądem. Aby sprawdzić cichy start, pomiń w poniższym prompcie
   polecenie wypisania `task_id` — jawne żądanie identyfikatora nadal wygrywa.
+  Panel ma wystarczyć za potwierdzenie startu: bez pustej ramki odpowiedzi i bez
+  ponowienia po „empty response”. Sprawdź też tryb z włączonym strumieniowaniem:
+  potwierdzenie nie powinno pojawić się na chwilę w rozmowie. Następna zwykła
+  odpowiedź i końcowy wynik Pi muszą się wyświetlić. W trybie głosowym/TTS oraz
+  na starszym hoście pozostaje krótkie potwierdzenie tekstowe.
 
 ## Prompt do wklejenia
 

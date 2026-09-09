@@ -222,8 +222,10 @@ class ManagerActivityTests(PiManagerTestCase):
                 self.assertEqual('cli_live_view' in result, attached)
                 self.assertNotIn('desktop_live_view', result)
                 if attached:
-                    self.assertIn('without a separate startup/status message', result['cli_live_view']['instruction'])
-                    self.assertIn('unless the user explicitly requested one', result['cli_live_view']['instruction'])
+                    # This fixture has no owning CLI renderer: attachment alone
+                    # must not promise silence or request an empty model reply.
+                    self.assertNotIn('quiet_start', result['cli_live_view'])
+                    self.assertIn('do not return an empty response', result['cli_live_view']['instruction'])
 
     def test_start_ack_supplies_desktop_card_without_polling_or_notifications(self):
         import tools
