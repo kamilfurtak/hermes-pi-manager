@@ -122,6 +122,36 @@ class TestCLIDelivery(OutboxTestCase):
         self.assertEqual(self.prints, [])
         self.assertEqual(self.delivery.calls[0]["target"], "telegram:123:4")
 
+    def test_legacy_workers_cannot_claim_cli_rows_even_after_retry_or_expiry(self):
+        import sqlite3
+        nid = self.enqueue()
+        legacy = sqlite3.connect(self.registry.path)
+        self.addCleanup(legacy.close)
+
+        def legacy_tick():
+            # Exact predicates used by pre-CLI Registry.claim_notifications.
+            legacy.execute("UPDATE notifications SET status='pending', lease_until=NULL, "
+                           "worker_id=NULL WHERE status='leased' AND lease_until <= ?", (self.clock() + 100,))
+            rows = legacy.execute("SELECT notification_id FROM notifications WHERE status='pending' "
+                                  "AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+                                  (self.clock() + 100,)).fetchall()
+            legacy.commit()
+            self.assertEqual(rows, [])
+
+        legacy_tick()
+        row = self.outbox.claim("owner", 1)[0]
+        self.assertEqual(row["status"], "cli_leased")
+        legacy_tick()
+        self.registry.requeue_expired_leases(self.clock() + 2)
+        self.assertEqual(self.registry.get_notification(nid)["status"], "cli_pending")
+        legacy_tick()
+        row = self.outbox.claim("owner", 1)[0]
+        self.outbox.mark_failed(row, "temporary renderer failure", transient=True)
+        self.assertEqual(self.registry.get_notification(nid)["status"], "cli_pending")
+        legacy_tick()
+        self.assertEqual(self.worker.run_once(now=self.clock() + 100), 1)
+        self.assertEqual(self.registry.get_notification(nid)["status"], "sent")
+
     def test_desktop_never_acquires_cli_destination(self):
         for origin in ({"source": "desktop"}, {"ui_session_id": "tab"}, {"source": "tui"}):
             self.assertEqual(cli_host.capture(origin), {})

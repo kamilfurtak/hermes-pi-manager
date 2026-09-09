@@ -160,6 +160,8 @@ CLI notices use the existing command-safe renderer on the prompt_toolkit loop,
 without model input. They require the original process and session (or its
 compression tip), and wait while the parent is running. `/new`, a closed CLI or
 a foreign process cannot receive them; unavailable notices remain pending.
+CLI queue states are isolated from the older workers’ pending/leased states,
+so long-lived processes with an older plugin cannot claim local notices.
 The CLI adapter captures identity when a new task is dispatched: reopen the
 CLI to load an updated plugin before testing. No Desktop frontend reload is
 needed for a CLI-only change.

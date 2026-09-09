@@ -273,7 +273,7 @@ class NotificationOutbox:
                                          (origin.get("session_id") if platform == "tui" else None)),
                 "scope_id": _safe_ref(origin.get("scope_id")),
                 "message": message,
-                "status": STATUS_PENDING,
+                "status": "cli_pending" if cli_host.is_cli(origin) else STATUS_PENDING,
                 "attempts": 0,
                 "next_retry_at": None,
                 "lease_until": None,

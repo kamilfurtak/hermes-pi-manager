@@ -415,6 +415,10 @@ class Registry:
         return [dict(r) for r in rows][::-1]
 
     # -- notifications (plugin-owned delivery outbox) ---------------------
+    # CLI rows use cli_pending/cli_leased so pre-CLI plugin processes sharing
+    # this database cannot claim them through their status='pending' query.
+    # Retry and lease expiry must preserve that isolation. Other channels
+    # keep the existing pending/leased states; sent/failed remain shared.
     #
     # The outbox is durable at-least-once with best-effort local dedupe by
     # notification_id (INSERT OR IGNORE). It never claims exactly-once: a
@@ -461,8 +465,11 @@ class Registry:
             if self._closed:
                 return 0
             cur = self._conn.execute(
-                "UPDATE notifications SET status = 'pending', lease_until = NULL, worker_id = NULL "
-                "WHERE status = 'leased' AND lease_until IS NOT NULL AND lease_until <= ?",
+                "UPDATE notifications SET status = CASE status "
+                "WHEN 'cli_leased' THEN 'cli_pending' ELSE 'pending' END, "
+                "lease_until = NULL, worker_id = NULL "
+                "WHERE status IN ('leased', 'cli_leased') "
+                "AND lease_until IS NOT NULL AND lease_until <= ?",
                 (now,),
             )
             n = cur.rowcount or 0
@@ -481,13 +488,17 @@ class Registry:
             if self._closed:
                 return []
             self._conn.execute(
-                "UPDATE notifications SET status = 'pending', lease_until = NULL, worker_id = NULL "
-                "WHERE status = 'leased' AND lease_until IS NOT NULL AND lease_until <= ?",
+                "UPDATE notifications SET status = CASE status "
+                "WHEN 'cli_leased' THEN 'cli_pending' ELSE 'pending' END, "
+                "lease_until = NULL, worker_id = NULL "
+                "WHERE status IN ('leased', 'cli_leased') "
+                "AND lease_until IS NOT NULL AND lease_until <= ?",
                 (now,),
             )
             cur = self._conn.execute(
                 "SELECT * FROM notifications "
-                "WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= ?) "
+                "WHERE status IN ('pending', 'cli_pending') "
+                "AND (next_retry_at IS NULL OR next_retry_at <= ?) "
                 "ORDER BY created_at, notification_id",
                 (now,),
             )
@@ -502,7 +513,8 @@ class Registry:
             if ids:
                 ph = ", ".join("?" for _ in ids)
                 self._conn.execute(
-                    f"UPDATE notifications SET status = 'leased', worker_id = ?, "
+                    f"UPDATE notifications SET status = CASE status "
+                    f"WHEN 'cli_pending' THEN 'cli_leased' ELSE 'leased' END, worker_id = ?, "
                     f"lease_until = ?, attempts = attempts + 1 "
                     f"WHERE notification_id IN ({ph})",
                     [worker_id, now + lease_seconds, *ids],
@@ -534,7 +546,9 @@ class Registry:
             if self._closed:
                 return
             self._conn.execute(
-                "UPDATE notifications SET status = 'pending', next_retry_at = ?, "
+                "UPDATE notifications SET status = CASE "
+                "WHEN status IN ('cli_pending', 'cli_leased') THEN 'cli_pending' "
+                "ELSE 'pending' END, next_retry_at = ?, "
                 "lease_until = NULL, worker_id = NULL, last_error = ? "
                 "WHERE notification_id = ?",
                 (next_retry_at, last_error, notification_id),
