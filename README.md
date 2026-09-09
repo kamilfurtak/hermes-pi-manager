@@ -109,7 +109,7 @@ There is deliberately no blocking wait tool.
 | Host | Passive progress | Terminal continuation |
 |---|---|---|
 | Telegram/gateway | Existing native messaging adapter | Existing `inject_message(session_key=...)` |
-| Interactive CLI | Existing behavior; no fabricated messaging target | Owning CLI's pending-input/interrupt rail |
+| Classic interactive CLI | No passive progress destination when no platform/chat is present | Owning CLI's pending-input/interrupt rail |
 | Ordinary Desktop/TUI | `notification.show` to the session's native transport | Native prompt admission in that same backend |
 
 Desktop waits until the current turn, queued human prompts and scheduled native
@@ -148,6 +148,12 @@ is made, and the retired private completion queue is not restored.
 hermes plugins doctor . --ci                 # manifest + registration contract
 cd tests && for f in test_*.py; do python3 -m unittest "${f%.py}" -q; done
 ```
+
+For a manual channel check, see [the notification and continuation smoke prompt](docs/manual-channel-smoke.md).
+The first progress notice is eligible after 90 seconds, later ones at least
+180 seconds apart, and each requires observed progress. A brief task normally
+produces only its terminal notice. Classic CLI continuation does not imply
+passive progress delivery; Desktop/TUI and messaging have distinct adapters.
 
 ## License
 
