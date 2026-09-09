@@ -25,7 +25,7 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
-    from . import desktop_host
+    from . import desktop_host, cli_host
     from .core import (  # type: ignore
         HOST_RUNTIME_ID, continuation_id_for, format_terminal_wake_message,
     )
@@ -33,6 +33,7 @@ try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry  # type: ignore
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     import desktop_host
+    import cli_host
     from core import (  # type: ignore
         HOST_RUNTIME_ID, continuation_id_for, format_terminal_wake_message,
     )
@@ -217,7 +218,7 @@ class TerminalWakeWorker:
             return self._gateway_injector_live() is not False
         owner = origin.get("host_runtime_id")
         if owner == HOST_RUNTIME_ID:
-            return True
+            return cli_host.can_wake(origin) if cli_host.is_cli(origin) else True
         task_id = row["task_id"]
         requested_at = row.get("wake_requested_at")
         age = (now - float(requested_at)) if requested_at is not None else 0.0
@@ -267,6 +268,17 @@ class TerminalWakeWorker:
                 return
             accepted = outcome == "accepted"
             error = None if accepted else "Desktop wake denied: allow_gateway_injection grant is required"
+        elif cli_host.is_cli(origin):
+            try:
+                outcome = cli_host.deliver_wake(origin, message)
+            except Exception as exc:
+                self.registry.mark_wake_uncertain(task_id, str(exc), now)
+                self._event(task_id, 'wake_uncertain', {'surface': 'cli', 'error': str(exc)})
+                return
+            if outcome in ('busy', 'unavailable'):
+                self.registry.defer_terminal_wake(task_id, now + self.interval)
+                return
+            accepted = outcome == 'accepted'
         else:
             try:
                 accepted = bool(self._ctx.inject_message(message, session_key=session_key))

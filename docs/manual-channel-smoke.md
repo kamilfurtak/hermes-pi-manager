@@ -13,10 +13,14 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
 - Telegram: statusy w bieżącym czacie/temacie.
 - Desktop/TUI: natywne powiadomienia; w Desktop jeden toast na zadanie,
   zastępowany następnym i widoczny przez 20 sekund. To nie powiadomienie macOS.
-- Klasyczny interaktywny CLI: statusy nad polem wpisywania oraz automatyczne
-  wznowienie po zakończeniu. Otwórz CLI z aktualną wtyczką przed zleceniem
-  nowego zadania. Statusy nie uruchamiają modelu i zachowują wpisywany tekst;
-  są doręczane tylko w procesie i rozmowie, które uruchomiły zadanie.
+- Klasyczny interaktywny CLI: aktualizowany natywny panel subagentów przy polu
+  wpisywania. `Ctrl+T` / `F6` otwiera listę, `Enter` podgląd strumienia,
+  `Esc` wraca, `F7` zwija panel. Wpisz szkic wiadomości, otwórz i zamknij
+  podgląd: szkic ma pozostać. Podczas pracy Pi możesz wysłać Hermesowi inne
+  polecenie; wynik Pi ma poczekać, aż ta tura się zakończy. Statusy nie
+  uruchamiają modelu ani nie powtarzają się w historii. Starszy Hermes bez
+  natywnego panelu nadal otrzymuje statusy tekstowe nad polem wpisywania.
+  Otwórz nowy proces CLI po aktualizacji wtyczki, zanim zlecisz zadanie.
 
 ## Prompt do wklejenia
 

@@ -394,6 +394,8 @@ def handle_pi_task(args: Dict[str, Any], **_kw) -> str:
         prompt=str(prompt), cwd=str(cwd_path), task_id=args.get("task_id"),
         thresholds=thresholds, verifier=verifier, origin=origin or None,
     )
+    if result.get("task_id") and cli_host.is_cli(origin):
+        cli_host.ensure_monitor(manager)
     if (result.get("task_id") and (origin.get("ui_session_id")
             or origin.get("source") in ("desktop", "tui"))):
         task_id = str(result["task_id"])
@@ -672,6 +674,7 @@ def _pi_binary_available() -> bool:
 
 
 def _stop_all_workers() -> None:
+    cli_host.stop_monitor()
     _stop_worker()
     _stop_wake_worker()
 

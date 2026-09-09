@@ -82,7 +82,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry, bound  # type: ignore
-    from . import lsp_check  # type: ignore
+    from . import lsp_check, execution_owner  # type: ignore
+    from .activity import load_snapshot, activity_summary
     from .outbox import NotificationOutbox, _safe_ref  # type: ignore
     from .rpc_transport import (  # type: ignore
         PiRpcTransport,
@@ -94,7 +95,8 @@ try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     )
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from registry_db import Registry, bound
-    import lsp_check  # type: ignore
+    import lsp_check, execution_owner  # type: ignore
+    from activity import load_snapshot, activity_summary
     from outbox import NotificationOutbox, _safe_ref
     from rpc_transport import (
         PiRpcTransport,
@@ -604,6 +606,7 @@ class PiManager:
         self.thinking = thinking
         self._runtimes: Dict[str, _TaskRuntime] = {}
         self._runtimes_lock = threading.RLock()
+        self._execution_locks = {}
         # Non-reentrant on purpose: it is a "one prune at a time" gate, not a
         # critical section.
         self._prune_gate = threading.Semaphore(1)
@@ -616,6 +619,22 @@ class PiManager:
 
     def _now(self) -> float:
         return self._clock()
+
+    def _claim_execution(self, task_id):
+        with self._runtimes_lock:
+            if task_id in self._execution_locks:
+                return False
+            fd = execution_owner.acquire(self.registry.path.parent / 'execution-locks', task_id)
+            if fd is None:
+                return False
+            self._execution_locks[task_id] = fd
+            return True
+
+    def _release_execution(self, task_id):
+        with self._runtimes_lock:
+            fd = self._execution_locks.pop(task_id, None)
+            if fd is not None:
+                execution_owner.release(fd)
 
     def _rt(self, task_id: str) -> Optional[_TaskRuntime]:
         with self._runtimes_lock:
@@ -661,6 +680,15 @@ class PiManager:
         thresholds = thresholds or self.default_thresholds
         cwd = str(Path(cwd).expanduser())
 
+        if not self._claim_execution(task_id):
+            raise RuntimeError('task already has a live execution owner')
+        try:
+            return self._start_task_owned(task_id, prompt, cwd, thresholds, verifier, system_prompt_file, origin)
+        except BaseException:
+            self._release_execution(task_id)
+            raise
+
+    def _start_task_owned(self, task_id, prompt, cwd, thresholds, verifier, system_prompt_file, origin):
         now = self._now()
         # Allocate a unique, durable session file BEFORE the boot thread
         # starts: <registry-parent>/sessions/<uuid>.jsonl. The exact path is
@@ -779,6 +807,8 @@ class PiManager:
         except Exception as exc:
             self._set_execution_state(task_id, EXEC_CRASHED,
                                        last_error=bound(f"spawn failed: {exc}"))
+            self._notify_failed(task_id)
+            self._request_terminal_wake(task_id)
             return
 
         transport = PiRpcTransport(
@@ -884,6 +914,13 @@ class PiManager:
         try:
             row = self.registry.get_task(task_id) or {}
             message = format_notification_message(kind, task_id, row)
+            if kind == 'progress':
+                data = load_snapshot(self.registry.path.parent / 'activity', task_id)
+                summary = activity_summary(data)
+                if summary:
+                    message += '\n' + summary
+                if 'tools_completed' in data:
+                    message += f"\nUkończone wywołania narzędzi: {data['tools_completed']}."
             return self.outbox.enqueue(task_id, kind, message)
         except Exception as exc:
             logger.debug("outbox enqueue failed for %s (%s): %s", task_id, kind, exc)
@@ -891,6 +928,7 @@ class PiManager:
 
     def _notify_failed(self, task_id: str) -> None:
         self._enqueue_notification(task_id, "failed")
+        self._release_execution(task_id)
 
     def _notify_stalled(self, task_id: str) -> None:
         self._enqueue_notification(task_id, "stalled")
@@ -1192,6 +1230,7 @@ class PiManager:
             kind = "settled"
         self._enqueue_notification(task_id, kind)
         self._request_terminal_wake(task_id)
+        self._release_execution(task_id)
         if self._notifier is None:
             return
         try:
@@ -2117,6 +2156,30 @@ class PiManager:
         return results
 
     def recover_task(self, task_id: str) -> Dict[str, Any]:
+        # Loading a plugin in another CLI/Desktop/gateway must never reopen
+        # a live Pi session. Exclusion also covers STARTING before it has a
+        # PID, and settlement while the verifier is still running.
+        if not self._claim_execution(task_id):
+            return {'task_id': task_id, 'recovered': False, 'reason': 'execution_owner_active'}
+        try:
+            row = self.registry.get_task(task_id)
+            if row and execution_owner.process_alive(row.get('pid')):
+                self._release_execution(task_id)
+                return {'task_id': task_id, 'recovered': False, 'reason': 'worker_process_active'}
+            if (row and row['execution_state'] == EXEC_STARTING and row.get('pid') is None and row.get('session_file')
+                    and 0 <= self._now() - (row.get('created_at') or 0) < 60):
+                # A pre-lock host can briefly publish STARTING before its PID.
+                self._release_execution(task_id)
+                return {'task_id': task_id, 'recovered': False, 'reason': 'worker_starting'}
+            result = self._recover_task_owned(task_id)
+            if not result.get('recovered') or (row and row['execution_state'] == EXEC_SETTLED):
+                self._release_execution(task_id)
+            return result
+        except BaseException:
+            self._release_execution(task_id)
+            raise
+
+    def _recover_task_owned(self, task_id: str) -> Dict[str, Any]:
         row = self.registry.get_task(task_id)
         if row is None:
             raise KeyError(task_id)
@@ -2295,6 +2358,8 @@ class PiManager:
             if (thread is not None and thread.is_alive()
                     and thread is not threading.current_thread()):
                 thread.join(timeout=2.0)
+        for task_id in list(self._execution_locks):
+            self._release_execution(task_id)
 
 
 def _canonical_path(value: Optional[str]) -> Optional[str]:

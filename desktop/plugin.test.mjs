@@ -122,6 +122,34 @@ test('message IDs preserve repeated identical progress messages', () => {
   assert.deepEqual(result.map(entry => entry.id), ['m1', 'm2']);
 });
 
+test('available native SDK components render state, controls and logs with a complete summary', async () => {
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost' });
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  Object.assign(piTestSdk, {
+    Button: ({ variant, size, ...props }) => h('button', { ...props, 'data-native-button': variant }),
+    StatusDot: ({ tone }) => h('span', { 'data-native-tone': tone }),
+    LogView: props => h('div', { ...props, 'data-native-log': true }),
+  });
+  const root = createRoot(document.getElementById('root'));
+  try {
+    const activity = { seq: 1, tools_completed: 3, text: '**Etap 4/6:** uruchamiam testy. ' + 'Sprawdzam. '.repeat(50),
+      tool: { name: 'bash', text: 'test output' }, entries: [] };
+    await act(async () => root.render(h(PiCard, { ctx: { rest: async () => view({ activity }) }, taskId: 'pi-test' })));
+    assert.match(document.body.textContent, /Etap 4\/6: uruchamiam testy/);
+    assert.doesNotMatch(document.body.textContent, /\*\*/);
+    assert.equal(document.querySelector('button').dataset.nativeButton, 'text');
+    assert.equal(document.querySelector('[data-native-tone]').dataset.nativeTone, 'muted');
+    await act(async () => document.querySelector('button').click());
+    assert.equal(document.querySelector('[data-native-log]').textContent, 'test output');
+  } finally {
+    await act(async () => root.unmount());
+    delete piTestSdk.Button; delete piTestSdk.StatusDot; delete piTestSdk.LogView;
+    dom.window.close();
+  }
+});
+
 test('completed tools fold separately while the final answer renders once as Markdown', async () => {
   const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost' });
   globalThis.window = dom.window;

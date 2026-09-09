@@ -75,7 +75,7 @@ function ToolEntry({ entry, live = false }) {
       h('strong', { style: { fontWeight: 550 } }, TOOL_NAMES[entry.name] || entry.name || 'Narzędzie'),
       h('span', { style: { ...muted, marginLeft: 10, ...(entry.error ? { color: 'var(--destructive, #dc6666)', opacity: 1 } : {}) } }, status)),
     shortened ? h('p', { style: { ...muted, margin: '4px 0' } }, 'Fragment wyjścia; wcześniejszą część pominięto.') : null,
-    body ? h('pre', { style: pre }, body)
+    body ? h(sdk.LogView || 'pre', { style: sdk.LogView ? { maxHeight: 260, marginTop: 8 } : pre }, body)
       : h('p', { style: muted }, live ? 'Narzędzie jeszcze nie wysłało wyjścia.' : 'Bez wyjścia tekstowego.'),
   );
 }
@@ -166,15 +166,21 @@ export function PiCard({ ctx, taskId }) {
   const tool = activity?.tool;
   const finished = data && FINAL.has(data.execution_state);
   const status = paused ? 'Podgląd wstrzymany — otwórz połączenie tej rozmowy'
+    : data?.verification_state === 'PENDING' ? 'Weryfikacja w toku'
     : (LABELS[data?.execution_state] || 'Łączenie z zadaniem Pi…');
-  const text = tool?.text || activity?.text || '';
+  const text = activity?.text || [...(activity?.entries || [])].reverse().find(e => e.kind === 'assistant' && e.text)?.text || tool?.text || '';
+  const summary = text.replace(/^#+\s*/gm, '').replace(/[*`]/g, '').replace(/\s+/g, ' ').trim();
+  const tone = ['ABORTED', 'CRASHED'].includes(data?.execution_state) || ['FAIL', 'UNRUNNABLE'].includes(data?.verification_state) ? 'bad'
+    : ['STALLED', 'UNRESPONSIVE'].includes(data?.execution_state) ? 'warn' : data?.verification_state === 'PASS' ? 'good' : 'muted';
   const updated = activity?.updated_at ? new Date(activity.updated_at * 1000).toLocaleTimeString() : null;
 
   return h('section', { className: 'pi-live-view', style: box, 'aria-label': `Praca Pi ${taskId}` },
     h('style', null, proseStyles),
     h('div', { style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 } },
-      h('strong', null, `Pi · ${status}`),
-      h('button', { type: 'button', onClick: () => setExpanded(!expanded), 'aria-expanded': expanded,
+      h('strong', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        sdk.StatusDot ? h(sdk.StatusDot, { tone }) : null, `Pi · ${status}`),
+      h(sdk.Button || 'button', { type: 'button', ...(sdk.Button ? { variant: 'text', size: 'micro' } : {}),
+        onClick: () => setExpanded(!expanded), 'aria-expanded': expanded,
         style: { cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, expanded ? 'Zwiń' : 'Pokaż przebieg')),
     h('div', { style: muted }, taskId,
       activity ? ` · ukończone wywołania narzędzi: ${activity.tools_completed}` : '',
@@ -182,7 +188,8 @@ export function PiCard({ ctx, taskId }) {
     data?.active_tool ? h('div', { style: { fontSize: 13, marginTop: 6 } }, `Narzędzie: ${data.active_tool}`) : null,
     current?.error ? h('p', { role: 'status', style: muted }, current.error) : null,
     !paused && data && !activity ? h('p', { style: muted }, 'Brak zapisu strumienia dla tego zadania. Nowy worker utworzy podgląd po załadowaniu dodatku przez backend.') : null,
-    !expanded && text ? h('p', { style: { fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', marginTop: 8 } }, text.slice(-240)) : null,
+    !expanded && summary ? h('p', { style: { fontSize: 13, overflowWrap: 'anywhere', marginTop: 8 } },
+      summary.length > 240 ? summary.slice(0, 239) + '…' : summary) : null,
     expanded && activity ? h(ActivityTimeline, { activity, finished }) : null,
     finished ? h('div', { style: { ...muted, marginTop: 8 } },
       data.verification_state === 'PENDING' ? 'Weryfikacja w toku…'

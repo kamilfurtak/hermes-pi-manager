@@ -460,7 +460,7 @@ class OutboxWorker:
             elif row.get("platform") == "cli":
                 task = self.outbox.registry.get_task(row["task_id"]) or {}
                 result = cli_host.emit_status(
-                    parse_origin(task.get("origin")), row.get("message") or "", nid)
+                    parse_origin(task.get("origin")), row.get("message") or "", nid, kind=row.get("kind") or "")
             else:
                 result = self._deliver(
                     {"action": "send", "target": target,

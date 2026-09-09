@@ -99,6 +99,66 @@ class TestCLIDelivery(OutboxTestCase):
         self.cli._session_db = SimpleNamespace(resolve_resume_session_id=lambda sid: "tip")
         self.assertEqual(self.worker.run_once(), 1)
 
+    def test_monitor_progress_does_not_spam_scrollback_but_failure_still_prints(self):
+        nid = self.enqueue()
+        monitor = SimpleNamespace(cli=self.cli, closed=False, rows={'pi-cli': {}})
+        with patch.object(cli_host, '_monitor', monitor):
+            self.worker.run_once()
+            self.assertEqual(self.prints, [])
+            self.assertEqual(self.registry.get_notification(nid)['status'], 'sent')
+            self.outbox.enqueue('pi-cli', 'failed', 'Pi: błąd procesu')
+            self.worker.run_once()
+            self.assertIn('błąd procesu', self.prints[0][0][0])
+
+    def test_wake_uses_fifo_preserves_draft_and_never_interrupts_busy_parent(self):
+        consumed = []
+        self.cli._tui_process_one_input = consumed.append
+        self.app.current_buffer.text = 'unfinished draft'
+        self.cli._agent_running = True
+        self.assertFalse(cli_host.can_wake(self.origin))
+        self.assertEqual(cli_host.deliver_wake(self.origin, 'result'), 'unavailable')
+        self.cli._agent_running = False
+        self.assertEqual(cli_host.deliver_wake(self.origin, 'result'), 'accepted')
+        self.assertFalse(cli_host.can_wake(self.origin))
+        self.cli._tui_process_one_input(self.cli._pending_input.get_nowait())
+        self.assertEqual(consumed, ['result'])
+        self.assertTrue(self.cli._interrupt_queue.empty())
+        self.assertEqual(self.app.current_buffer.text, 'unfinished draft')
+
+    def test_wake_waits_for_native_inspector_and_drops_if_session_switches_before_consumption(self):
+        consumed = []
+        self.cli._tui_process_one_input = consumed.append
+        self.cli._subagent_monitor = SimpleNamespace(opening=True)
+        self.assertFalse(cli_host.can_wake(self.origin))
+        self.cli._subagent_monitor.opening = False
+        self.assertEqual(cli_host.deliver_wake(self.origin, 'old result'), 'accepted')
+        self.cli.session_id = 'new-session'
+        self.cli._tui_process_one_input(self.cli._pending_input.get_nowait())
+        self.assertEqual(consumed, [])
+        self.cli._tui_process_one_input('human message')
+        self.assertEqual(consumed, ['human message'])
+
+    def test_wake_worker_defers_busy_without_attempts_then_accepts_once(self):
+        from core import HOST_RUNTIME_ID
+        from wake_worker import TerminalWakeWorker
+        cli_host.bind(SimpleNamespace(_manager=self.manager), HOST_RUNTIME_ID)
+        origin = dict(self.origin, host_runtime_id=HOST_RUNTIME_ID)
+        self.registry.create_task('pi-wake-cli', origin=json.dumps(origin), execution_state='SETTLED',
+                                  verification_state='PASS', continuation_enabled=1, wake_state='pending',
+                                  wake_requested_at=self.clock())
+        self.cli._tui_process_one_input = lambda value: None
+        ctx = SimpleNamespace(inject_message=lambda *a, **kw: self.fail('must not inject an interrupt'))
+        worker = TerminalWakeWorker(self.registry, ctx, now_fn=self.clock)
+        self.cli._agent_running = True
+        self.assertEqual(worker.run_once(), 0)
+        self.assertEqual(self.registry.get_task('pi-wake-cli')['wake_attempts'], 0)
+        self.cli._agent_running = False
+        self.assertEqual(worker.run_once(), 1)
+        self.assertEqual(worker.run_once(), 0)
+        self.assertEqual(self.registry.get_task('pi-wake-cli')['wake_state'], 'accepted')
+        self.assertEqual(self.cli._pending_input.qsize(), 1)
+        self.assertTrue(self.cli._interrupt_queue.empty())
+
     def test_recheck_on_ui_loop_blocks_session_switch_after_claim(self):
         nid = self.enqueue()
         row = self.outbox.claim("test", 30)[0]

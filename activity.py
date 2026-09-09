@@ -45,6 +45,24 @@ def snapshot_path(directory, task_id):
     return Path(directory) / (hashlib.sha256(task_id.encode()).hexdigest() + ".json")
 
 
+def load_snapshot(directory, task_id):
+    """Read only the bounded, redacted projection shared by all host views."""
+    try:
+        with snapshot_path(directory, task_id).open('rb') as stream:
+            raw = stream.read(MAX_BYTES + 1)
+        value = json.loads(raw) if len(raw) <= MAX_BYTES else {}
+        return value if isinstance(value, dict) and value.get('task_id') == task_id and value.get('schema') == 1 else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def activity_summary(data, limit=180):
+    text = data.get('text') or next((entry.get('text') for entry in reversed(data.get('entries', []))
+                                    if entry.get('kind') == 'assistant' and entry.get('text')), '')
+    text = ' '.join(clipped(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
 class Projection:
     """Pi 0.85 RPC: text deltas append; partial tool results are cumulative."""
     def __init__(self, task_id):

@@ -71,6 +71,11 @@ messages or an estimated percentage, including overlapping calls. Only the
 foreground tool streams partial output; other tools enter history when completed.
 Execution and verification stay separate.
 
+Buttons, status dots and tool logs use the corresponding Desktop SDK components;
+older SDKs retain the text/HTML fallback. The collapsed preview starts at the
+beginning of the latest Pi message. This is a plugin transcript contribution:
+Desktop does not expose its built-in subagent roster as an external provider API.
+
 Install the Python plugin on the backend as usual and reload that backend after
 updating it. On the computer running Desktop, copy `desktop/plugin.js` into
 `~/.hermes/desktop-plugins/pi-manager/plugin.js`, then use **Settings → Plugins**
@@ -152,19 +157,51 @@ There is deliberately no blocking wait tool.
 
 | Host | Passive progress | Terminal continuation |
 |---|---|---|
-| Telegram/gateway | Existing native messaging adapter | Existing `inject_message(session_key=...)` |
-| Classic interactive CLI | Text above the prompt in the owning CLI session | Owning CLI's pending-input/interrupt rail |
+| Telegram/gateway | Native messaging adapter; latest visible stage and completed tool count | Existing `inject_message(session_key=...)` |
+| Classic interactive CLI | Native subagent dock and live inspector; passive text fallback on older hosts | Owning CLI's normal FIFO, after the parent is idle |
 | Ordinary Desktop/TUI | `notification.show` to the session's native transport | Native prompt admission in that same backend |
 
-CLI notices use the existing command-safe renderer on the prompt_toolkit loop,
-without model input. They require the original process and session (or its
-compression tip), and wait while the parent is running. `/new`, a closed CLI or
-a foreign process cannot receive them; unavailable notices remain pending.
+The CLI adapter adds Pi rows to the existing `SubagentMonitor` instance. It uses
+the host's dock, theme, fullscreen viewer and keybindings: **Ctrl+T / F6** opens
+the roster, **Enter** opens the selected live tail, **Esc** returns, and **F7**
+collapses the dock. Native subagents retain their original rows and controls.
+**s** queues guidance to Pi; **x**, then the native confirmation, stops it.
+Opening/closing the viewer preserves the composer draft and does not stop Pi.
+The native spinner refreshes activity about once a second even while the parent
+is idle or working on another request. Once no agents remain it stops repainting
+the idle prompt. No model turn is used for monitoring.
+
+Only the owning CLI process and conversation (or its compression tip) receive
+Pi rows and notices. `/new`, a closed CLI or a foreign process cannot receive
+them. When the native view is available, progress receipts do not also print
+repeated messages above the prompt. Terminal notices still use the native
+renderer. On older hosts the existing passive text notices remain available.
+Wakes wait for the parent, queued user input and native modals/inspector to clear;
+they enter the normal FIFO, never the interrupt queue. A scope guard checks the
+conversation again when a queued wake is consumed. A session switch can discard
+an already admitted wake; it is not replayed into a different conversation.
 CLI queue states are isolated from the older workers’ pending/leased states,
 so long-lived processes with an older plugin cannot claim local notices.
 The CLI adapter captures identity when a new task is dispatched: reopen the
-CLI to load an updated plugin before testing. No Desktop frontend reload is
-needed for a CLI-only change.
+CLI process to load an updated plugin before testing. Reconnecting Herdr to the
+same surviving process does not reload Python. Desktop frontend changes require
+copying/reloading its JS half as described above.
+
+All three views use the same bounded, redacted activity projection. Native
+Telegram provides message delivery rather than a terminal-style live inspector;
+the plugin does not impersonate a built-in subagent to manufacture one.
+Passive notices remain rate-limited, and execution/verification remain separate.
+Tool errors appear in live output; a failed command that Pi handles is not
+automatically a failed task. Task failures and verifier outcomes use terminal
+notices without waiting for the progress interval (delivery still requires a
+live channel and the normal outbox drain).
+
+Execution ownership is separate from notification ownership. A plugin-owned OS
+lock protects each task from before STARTING through verification, so loading a
+second Hermes host cannot reopen live Pi work. Legacy tasks with a live worker
+PID are left alone; lock ownership is released on completion or process exit.
+Recovery still validates session identity after an owner is gone. These are
+Unix advisory locks alongside the registry, not changes to Hermes source.
 
 Desktop waits until the current turn, queued human prompts and scheduled native
 continuation are clear. An absent owner does not spend the retry budget or block
@@ -190,6 +227,13 @@ surface, because the public API exposes no equivalent:
   compatibility adapter, not official generic Desktop `inject_message` support.
 - `wake_worker.py` reads the context's manager to determine whether this process
   actually has the gateway injector.
+- `cli_host.py` → the owning CLI application and normal input FIFO, with scope
+  checks at enqueue and consumption; passive notices use the native renderer.
+- `cli_monitor.py` → instance-local adapters for native `SubagentMonitor.refresh`
+  and `control`. The native UI/keybindings are reused; methods are restored on
+  teardown. No native delegation registry entries or Hermes files are changed.
+  Readable tails are private, redacted projections (at most 256 files/7 days),
+  not raw Pi session transcripts.
 
 Hermes upgrades require rechecking these boundaries. Missing Desktop capability
 or session ownership leaves rows pending; uncertain admission requires diagnosis.
@@ -204,10 +248,11 @@ cd tests && for f in test_*.py; do python3 -m unittest "${f%.py}" -q; done
 ```
 
 For a manual channel check, see [the notification and continuation smoke prompt](docs/manual-channel-smoke.md).
-The first progress notice is eligible after 90 seconds, later ones at least
+The first passive progress notice is eligible after 90 seconds, later ones at least
 180 seconds apart, and each requires observed progress. A brief task normally
-produces only its terminal notice. CLI, Desktop/TUI and messaging have distinct
-passive adapters; terminal continuation remains a separate path.
+produces only its terminal notice. The native CLI dock and Desktop card update
+independently, about once a second. CLI, Desktop/TUI and messaging have distinct
+host adapters; terminal continuation remains a separate path.
 
 ## License
 
