@@ -671,6 +671,7 @@ class TestTerminalWakeWorker(_OutboxManagerCase):
         # The previous process claimed the wake and then died.
         self.assertTrue(self.registry.claim_terminal_wake(task_id, self.clock()))
         self.assertEqual(self.registry.get_task(task_id)["wake_state"], "dispatching")
+        self.registry.update_task(task_id, wake_owner_pid=None)  # legacy/dead-owner record
 
         # Fresh plugin load: brand-new worker, brand-new ctx.
         ctx = FakePluginContext()

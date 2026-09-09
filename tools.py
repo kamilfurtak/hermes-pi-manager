@@ -195,6 +195,12 @@ def _capture_routing() -> Dict[str, Any]:
     # Unconditional, and last so nothing above can shadow it: the wake
     # worker needs to know which process dispatched the task even when the
     # session context yielded nothing at all.
+    if out.get("ui_session_id") or out.get("source") in ("tui", "desktop"):
+        try:
+            from hermes_constants import get_hermes_home
+            out["hermes_home"] = str(get_hermes_home())
+        except ImportError:
+            pass
     out["host_runtime_id"] = HOST_RUNTIME_ID
     return out
 

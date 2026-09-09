@@ -865,6 +865,9 @@ class TestProgressGating(OutboxTestCase):
         self.emit_and_sync(manager, process, task_id, {"type": "agent_settled"})
         self.assertTrue(wait_until(
             lambda: manager.status(task_id)["execution_state"] == EXEC_SETTLED))
+        # The reader persists settlement before enqueueing its notice. Wait
+        # for that independent delivery side effect before checking its count.
+        self.assertTrue(wait_until(lambda: "settled" in self._kinds(task_id)))
         rt = manager._rt(task_id)
         self.clock.advance(3600)
         manager._notify_progress(task_id, rt)  # must be a no-op

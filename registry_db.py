@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     wake_requested_at   REAL,
     wake_accepted_at    REAL,
     wake_last_error     TEXT,
+    wake_owner_pid      INTEGER,
     created_at          REAL,
     updated_at          REAL
 );
@@ -142,7 +143,7 @@ TASK_FIELDS = [
     "active_request_id", "message_count", "is_streaming", "is_compacting",
     "settled_at", "exit_code", "last_error", "stderr_tail", "verifier_spec",
     "abort_requested", "origin", "continuation_enabled", "wake_state",
-    "wake_attempts", "wake_requested_at", "wake_accepted_at", "wake_last_error",
+    "wake_attempts", "wake_requested_at", "wake_accepted_at", "wake_last_error", "wake_owner_pid",
     "created_at", "updated_at",
 ]
 
@@ -172,6 +173,7 @@ _TASKS_MIGRATIONS = {
     "wake_requested_at": "REAL",
     "wake_accepted_at": "REAL",
     "wake_last_error": "TEXT",
+    "wake_owner_pid": "INTEGER",
     # Compact terminal verdict, written once when the task reaches its
     # terminal state. Both feed format_terminal_wake_message so the ONE
     # continuation wake can carry the outcome instead of telling the
@@ -469,6 +471,7 @@ class Registry:
 
     def claim_notifications(
         self, now: float, worker_id: str, lease_seconds: float, limit: int = 8,
+        can_claim=None,
     ) -> List[Dict[str, Any]]:
         """Requeue expired leases, then lease up to ``limit`` due pending rows
         for this worker in one atomic step (attempts is incremented on
@@ -483,12 +486,19 @@ class Registry:
                 (now,),
             )
             cur = self._conn.execute(
-                "SELECT notification_id FROM notifications "
+                "SELECT * FROM notifications "
                 "WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= ?) "
-                "ORDER BY created_at, notification_id LIMIT ?",
-                (now, limit),
+                "ORDER BY created_at, notification_id",
+                (now,),
             )
-            ids = [r[0] for r in cur.fetchall()]
+            ids = []
+            for candidate in cur:
+                row = dict(candidate)
+                if can_claim is None or can_claim(row):
+                    ids.append(row["notification_id"])
+                    if len(ids) >= limit:
+                        break
+            cur.close()
             if ids:
                 ph = ", ".join("?" for _ in ids)
                 self._conn.execute(
@@ -623,7 +633,7 @@ class Registry:
             row = cur.fetchone()
             return (row[0] or "") if row else ""
 
-    def list_wake_pending(self, now: float, limit: int = 8) -> List[Dict[str, Any]]:
+    def list_wake_pending(self, now: float, limit: Optional[int] = 8) -> List[Dict[str, Any]]:
         """Due 'pending' wakes (wake_requested_at doubles as next-retry-at)."""
         with self._lock:
             if self._closed:
@@ -633,7 +643,7 @@ class Registry:
                 "AND continuation_enabled = 1 "
                 "AND (wake_requested_at IS NULL OR wake_requested_at <= ?) "
                 "ORDER BY wake_requested_at, task_id LIMIT ?",
-                (now, limit),
+                (now, -1 if limit is None else limit),
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -645,9 +655,9 @@ class Registry:
                 return False
             cur = self._conn.execute(
                 "UPDATE tasks SET wake_state = 'dispatching', "
-                "wake_attempts = wake_attempts + 1, updated_at = ? "
+                "wake_attempts = wake_attempts + 1, wake_owner_pid = ?, updated_at = ? "
                 "WHERE task_id = ? AND wake_state = 'pending'",
-                (time.time(), task_id),
+                (os.getpid(), time.time(), task_id),
             )
             self._conn.commit()
             return bool(cur.rowcount)
@@ -662,6 +672,28 @@ class Registry:
                 "wake_last_error = NULL, updated_at = ? WHERE task_id = ?",
                 (now, time.time(), task_id),
             )
+            self._conn.commit()
+
+    def defer_terminal_wake(self, task_id: str, next_retry_at: float) -> None:
+        """No admission occurred: busy/missing owner is not a failed attempt."""
+        with self._lock:
+            if self._closed:
+                return
+            self._conn.execute(
+                "UPDATE tasks SET wake_state='pending', wake_requested_at=?, "
+                "wake_attempts=MAX(0,wake_attempts-1), wake_owner_pid=NULL, updated_at=? "
+                "WHERE task_id=? AND wake_state='dispatching'",
+                (next_retry_at, time.time(), task_id))
+            self._conn.commit()
+
+    def mark_wake_uncertain(self, task_id: str, error: str, now: float) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._conn.execute(
+                "UPDATE tasks SET wake_state='uncertain', wake_last_error=?, updated_at=? "
+                "WHERE task_id=? AND wake_state='dispatching'",
+                (bound(error, MAX_ERROR_CHARS), time.time(), task_id))
             self._conn.commit()
 
     def mark_wake_retry(
@@ -694,25 +726,38 @@ class Registry:
             self._conn.commit()
 
     def settle_stale_wake_dispatching(self, now: float) -> List[str]:
-        """Called at a fresh plugin (re)load: every 'dispatching' row belongs
-        to a dead process (it claimed the wake and died before recording the
-        outcome). The gateway may already have accepted that injection, so
-        each row is marked 'uncertain' and is NEVER dispatched again — a
-        duplicate orchestrator turn is worse than a missed wake. Returns the
-        affected task ids (for the audit events)."""
+        """Mark dispatches from dead or legacy unknown owners uncertain.
+
+        All Hermes processes share this DB. A recovery tick must preserve
+        another live process's dispatch. PID reuse/unknown liveness is handled
+        conservatively (left dispatching for diagnosis), never as permission
+        to replay a possibly accepted turn. Return affected task ids.
+        """
         with self._lock:
             if self._closed:
                 return []
-            ids = [r[0] for r in self._conn.execute(
-                "SELECT task_id FROM tasks WHERE wake_state = 'dispatching'"
-            ).fetchall()]
+            ids = []
+            for row in self._conn.execute(
+                "SELECT task_id,wake_owner_pid FROM tasks WHERE wake_state='dispatching'"
+            ).fetchall():
+                pid = row[1]
+                if pid:
+                    try:
+                        os.kill(int(pid), 0)
+                    except ProcessLookupError:
+                        pass
+                    except (OSError, ValueError):
+                        continue  # uncertain liveness is not proof of a dead dispatcher
+                    else:
+                        continue
+                ids.append(row[0])
             if ids:
-                self._conn.execute(
+                self._conn.executemany(
                     "UPDATE tasks SET wake_state = 'uncertain', wake_last_error = ?, "
-                    "updated_at = ? WHERE wake_state = 'dispatching'",
-                    (bound("worker died between claim and acceptance; not retried "
-                           "(the gateway may have already accepted the injection)"),
-                     time.time()),
+                    "updated_at = ? WHERE task_id=? AND wake_state = 'dispatching'",
+                    [(bound("worker died between claim and acceptance; not retried "
+                            "(the host may have already accepted the injection)"),
+                      time.time(), task_id) for task_id in ids],
                 )
                 self._conn.commit()
         return ids

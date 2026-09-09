@@ -1,52 +1,19 @@
-"""Plugin-owned terminal continuation wake worker.
+"""One durable terminal continuation per Pi task, after verification.
 
-Delivers the ONE durable terminal wake per task (see ``core.py`` module
-docstring and the ``registry_db`` terminal-wake methods). The worker holds
-a fresh ``PluginContext`` — taken from ``register(ctx)`` on each plugin
-load, kept ONLY as worker integration state, never in the PiManager core or
-on any task — and delivers by calling the public API::
+CLI and gateway retain PluginContext.inject_message. CLI delivery is bound to
+origin.host_runtime_id; gateway delivery requires a live gateway injector.
+Desktop/TUI uses desktop_host only in the backend holding the matching session.
+It waits behind the running turn and human FIFO; missing/busy owners spend no
+retry budget. There is no Bot Chat redirect or fallback to an unrelated CLI.
 
-    ctx.inject_message(message, session_key=origin.session_key)
+An accepted wake is never replayed. Gateway acceptance only proves scheduling;
+Desktop also records wake_turn_finished from the native terminal callback.
+A dispatch whose process died, or whose Desktop admission raised after a possible
+start, becomes uncertain: inspect evidence manually instead of duplicating a turn.
+Live dispatchers are preserved across other workers' recovery passes.
 
-exactly as ``hermes_cli.plugins.PluginContext.inject_message`` declares
-(``content, role='user', *, session_key=None -> bool``). That one call
-covers both surfaces, because the host checks its ``_cli_ref`` FIRST and
-returns True without ever consulting ``session_key``:
-
-  - GATEWAY wake — origin carries a session_key; any process holding the
-    live gateway may serve it, and ``True`` means the gateway accepted the
-    request for asynchronous dispatch (NOT that it was routed or
-    delivered).
-  - LOCAL wake — an interactive CLI leaves the session context empty, so
-    origin carries no session_key and the call passes ``session_key=None``.
-    Delivery then goes through ``_cli_ref`` -> ``_pending_input`` (idle) or
-    ``_interrupt_queue`` (mid-turn), which exists ONLY in the process that
-    dispatched the task. ``origin.host_runtime_id`` names that process and
-    ``_deliverable_here`` keeps every other worker off the row.
-
-A ``True`` return marks the wake row ``accepted`` (terminal). ``False`` or a
-raised exception means the dispatch did not happen (no live gateway and no
-CLI reference, missing session key, no
-``plugins.entries.<plugin>.allow_gateway_injection`` grant, scheduling
-failure): the row goes back to ``pending`` on the bounded backoff, and after
-the budget is spent it becomes ``exhausted``.
-
-Crash safety: the only state that is NOT automatically retried is a
-``dispatching`` row found at a fresh plugin (re)load — the previous process
-claimed it and died before recording the outcome, so the gateway may have
-ALREADY accepted the injection. Such a row is marked ``uncertain`` (audit
-only) and never dispatched again: a duplicate orchestrator turn is the
-failure this exists to prevent.
-
-This is the ONLY ``inject_message`` path in the plugin. Progress notices
-never inject, and the Telegram notification outbox keeps its existing
-delivery exactly (``host_adapter`` -> native ``send_message_tool`` ->
-gateway, zero agent turns). No completion queue, no event bus, no custom
-Telegram API — the explicit user-approved terminal wake is the only
-exception to the plugin's blanket "no injection" rule.
-
-Stdlib + registry only; the PluginContext is passed in, never imported, so
-the module is unit-testable with a fake context and no Hermes runtime.
+Progress notices use the separate passive outbox and never start a model turn.
+The worker owns only its current PluginContext, not a second session or queue.
 """
 
 from __future__ import annotations
@@ -58,12 +25,14 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
+    from . import desktop_host
     from .core import (  # type: ignore
         HOST_RUNTIME_ID, continuation_id_for, format_terminal_wake_message,
     )
     from .outbox import parse_origin  # type: ignore
     from .registry_db import Registry  # type: ignore
 except ImportError:  # pragma: no cover - standalone/test import (no package)
+    import desktop_host
     from core import (  # type: ignore
         HOST_RUNTIME_ID, continuation_id_for, format_terminal_wake_message,
     )
@@ -103,8 +72,7 @@ DEFAULT_LOCAL_WAKE_ORPHAN_SECONDS = 1800.0
 
 
 class TerminalWakeWorker:
-    """Drains the per-task terminal wake state machine through
-    ``PluginContext.inject_message``.
+    """Drains terminal wakes through the matching native host adapter.
 
     ``start()`` returns immediately (daemon thread); ``stop()`` signals the
     loop and joins with a bounded timeout — same lifecycle shape as
@@ -156,7 +124,7 @@ class TerminalWakeWorker:
     def stop(self, timeout: float = 5.0) -> None:
         """Signal the loop and join with a bounded timeout. A dispatch in
         flight past the timeout is a daemon thread finishing on its own; the
-        row's state machine (dispatching -> uncertain on next load) keeps it
+        row's state machine (dispatching while alive; uncertain after death) keeps it
         from being dispatched twice."""
         self._stop.set()
         thread = self._thread
@@ -187,13 +155,17 @@ class TerminalWakeWorker:
             stale = self.registry.settle_stale_wake_dispatching(now)
             for task_id in stale:
                 self._event(task_id, "wake_uncertain", {
-                    "note": "dispatching at plugin load; not retried to avoid "
+                    "note": "dispatch owner died or is legacy/unknown; not retried to avoid "
                             "a duplicate orchestrator turn",
                 })
         except Exception as exc:
             logger.warning("pi-wake: stale-dispatching recovery failed: %s", exc)
         claimed = 0
-        for row in self.registry.list_wake_pending(now, limit=self.max_per_tick):
+        # Apply the per-tick cap to eligible rows, not the first rows in the
+        # shared DB. Closed Desktop chats must not starve a live Telegram/CLI.
+        for row in self.registry.list_wake_pending(now, limit=None):
+            if claimed >= self.max_per_tick:
+                break
             if not self._deliverable_here(row, now):
                 continue  # another process owns this one; leave the budget alone
             if not self.registry.claim_terminal_wake(row["task_id"], now):
@@ -219,6 +191,10 @@ class TerminalWakeWorker:
         because its owner is gone and nobody else may claim it.
         """
         origin = parse_origin(row.get("origin"))
+        if desktop_host.is_desktop(origin):
+            # Ordinary Desktop sessions are not gateway/CLI injection targets.
+            # Busy sessions and foreign processes leave the retry budget alone.
+            return desktop_host.available(origin, idle=True)
         if origin.get("session_key"):
             # Gateway wake. Any process holding a LIVE gateway may serve it
             # (the session store is durable, so a restarted gateway serves an
@@ -273,14 +249,33 @@ class TerminalWakeWorker:
         session_key = origin.get("session_key") or None
         message = format_terminal_wake_message(task_id, fresh)
         error: Optional[str] = None
-        try:
-            accepted = bool(self._ctx.inject_message(message, session_key=session_key))
-        except Exception as exc:
-            accepted = False
-            error = f"inject_message raised: {exc}"
+        if desktop_host.is_desktop(origin):
+            try:
+                outcome = desktop_host.deliver_wake(
+                    origin, message, continuation_id_for(task_id), self._ctx,
+                    lambda receipt: self._event(task_id, "wake_turn_finished", {
+                        "status": str(receipt.get("status") or "unknown"),
+                        "error": str(receipt.get("error") or "")[:500],
+                        "surface": "desktop", "continuation_id": continuation_id_for(task_id),
+                    }))
+            except desktop_host.UncertainDelivery as exc:
+                self.registry.mark_wake_uncertain(task_id, str(exc), now)
+                self._event(task_id, "wake_uncertain", {"error": str(exc), "surface": "desktop"})
+                return
+            if outcome in ("busy", "unavailable"):
+                self.registry.defer_terminal_wake(task_id, now + self.interval)
+                return
+            accepted = outcome == "accepted"
+            error = None if accepted else "Desktop wake denied: allow_gateway_injection grant is required"
+        else:
+            try:
+                accepted = bool(self._ctx.inject_message(message, session_key=session_key))
+            except Exception as exc:
+                accepted = False
+                error = f"inject_message raised: {exc}"
         if accepted:
-            # True = the live gateway accepted the request for asynchronous
-            # dispatch. Terminal: record it and never touch this wake again.
+            # Accepted means the matching host admitted/scheduled the wake,
+            # not that its model turn finished. Never replay this wake.
             self.registry.mark_wake_accepted(task_id, now)
             self._event(task_id, "wake_accepted", {
                 "continuation_id": continuation_id_for(task_id),

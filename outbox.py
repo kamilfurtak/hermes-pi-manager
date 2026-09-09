@@ -5,7 +5,8 @@ internal Hermes queue disguised as a framework-internal delegation event.
 A task's routing
 origin is captured at dispatch time, persisted with the task in the registry,
 and every notification — progress and terminal — is a durable row in the
-``notifications`` table. A notifier worker drains it by calling the
+``notifications`` table. Desktop notices use desktop_host and the native notification.show renderer.
+Messaging notices use the
 plugin-local host adapter (``host_adapter.deliver_send_message``) directly,
 and that adapter imports and directly calls the Hermes-native
 tools.send_message_tool.send_message_tool: no Telegram Bot API calls, no
@@ -45,10 +46,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry, bound  # type: ignore
-    from . import host_adapter  # type: ignore
+    from . import host_adapter, desktop_host  # type: ignore
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from registry_db import Registry, bound  # type: ignore
     import host_adapter  # type: ignore
+    import desktop_host
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +246,10 @@ class NotificationOutbox:
             chat_id = origin.get("chat_id")
             thread_id = origin.get("thread_id")
             target = build_target(platform, chat_id, thread_id)
+            if desktop_host.is_desktop(origin):
+                platform = "tui"
+                chat_id = origin.get("ui_session_id")
+                target = "tui:" + str(origin.get("session_key") or origin.get("session_id") or "")
             message = bound(str(message or ""), MAX_MESSAGE_CHARS)
             if kind == PROGRESS_KIND:
                 nid = progress_notification_id(task_id, self.registry.progress_seq(task_id) + 1)
@@ -257,7 +263,8 @@ class NotificationOutbox:
                 "platform": _safe_ref(platform),
                 "chat_id": _safe_ref(chat_id),
                 "thread_id": _safe_ref(thread_id),
-                "session_key": _safe_ref(origin.get("session_key")),
+                "session_key": _safe_ref(origin.get("session_key") or
+                                         (origin.get("session_id") if platform == "tui" else None)),
                 "scope_id": _safe_ref(origin.get("scope_id")),
                 "message": message,
                 "status": STATUS_PENDING,
@@ -285,9 +292,10 @@ class NotificationOutbox:
     def claim(
         self, worker_id: str, lease_seconds: float, limit: int = 8,
         now: Optional[float] = None,
+        can_claim=None,
     ) -> List[Dict[str, Any]]:
         now = now if now is not None else self._now()
-        return self.registry.claim_notifications(now, worker_id, lease_seconds, limit)
+        return self.registry.claim_notifications(now, worker_id, lease_seconds, limit, can_claim=can_claim)
 
     def mark_sent(self, notification_id: str, now: Optional[float] = None) -> None:
         self.registry.set_notification_sent(notification_id,
@@ -400,13 +408,23 @@ class OutboxWorker:
 
     # -- delivery ------------------------------------------------------------
 
+    def _desktop_origin(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        # Keep profile identity from the original task. The notification table
+        # predates Desktop and stores only messaging-oriented routing fields.
+        task = self.outbox.registry.get_task(row["task_id"]) or {}
+        return parse_origin(task.get("origin")) or {
+            "source": "tui", "session_key": row.get("session_key"),
+            "ui_session_id": row.get("chat_id")}
+
     def run_once(self, now: Optional[float] = None) -> int:
         """One drain pass: requeue expired leases, claim due rows, deliver
         each. Public so tests can drive it deterministically. Returns the
         number of rows claimed."""
         now = now if now is not None else self._now_fn()
         rows = self.outbox.claim(self.worker_id, self.lease_seconds,
-                                 self.max_per_tick, now=now)
+                                 self.max_per_tick, now=now, can_claim=lambda row:
+                                 row.get("platform") != "tui" or
+                                 desktop_host.available(self._desktop_origin(row)))
         for row in rows:
             self._deliver_one(row, now)
         return len(rows)
@@ -425,10 +443,15 @@ class OutboxWorker:
             )
             return
         try:
-            result = self._deliver(
-                {"action": "send", "target": target,
-                 "message": row.get("message") or ""},
-            )
+            if row.get("platform") == "tui":
+                result = desktop_host.emit_status(
+                    self._desktop_origin(row), row.get("message") or "", nid,
+                    task_id=row["task_id"])
+            else:
+                result = self._deliver(
+                    {"action": "send", "target": target,
+                     "message": row.get("message") or ""},
+                )
         except Exception as exc:
             # A raised delivery (host tool unavailable, gateway down) is
             # treated as transient and bounded by the retry budget.

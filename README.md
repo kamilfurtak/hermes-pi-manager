@@ -19,13 +19,15 @@ are rejected, there are no hooks for observing intermediate progress, and
 
 ## Design invariants
 
-**Zero agent turns for anything but the result.** Progress notices go out
-through a durable outbox that calls the host's `send_message_tool` directly —
-no tool registry entry, no model-visible surface, no turn. The plugin
-deliberately registers no `send_message` tool.
+**Zero agent turns for anything but the result.** A durable outbox sends
+messaging notices through the host's `send_message_tool`; ordinary Desktop
+chats receive native in-app notices. Neither path invokes a model or registers
+a `send_message` tool. Desktop notices replace one toast per task and expire
+after 20 seconds; they are not persistent transcript lines or OS alerts.
 
 **One wake per task, carrying the verdict.** When a task reaches a terminal
-state *after* verification, the originating session is resumed once. The wake
+state *after* verification, one continuation is requested for its originating
+session. The wake
 carries the gate result and the semantic check, so a clean outcome needs no
 follow-up call at all:
 
@@ -45,10 +47,11 @@ is an in-process call — zero tokens.
 whether the agent finished; `verification_state` says whether the gate passed.
 A task can settle cleanly and still fail its gate.
 
-**Crash-safety over convenience.** A wake dispatch that survives a process
-death becomes `uncertain` and is never retried: the gateway may already have
-accepted it, and a duplicate orchestrator turn is the failure this state
-exists to prevent.
+**Crash-safety over convenience.** A wake dispatch whose owner died, or whose
+Desktop admission raised after a possible start, becomes `uncertain` and is
+never automatically retried. A live dispatcher is preserved when another Hermes
+process scans the shared registry. Acceptance is distinct from finishing the
+turn; Desktop records the latter as a `wake_turn_finished` event.
 
 ## Requirements
 
@@ -58,6 +61,9 @@ exists to prevent.
 - The `pi` binary on `PATH`. Without it the tools are hidden from the model
   entirely rather than offered and failing.
 - For terminal continuation, the gateway-injection grant below.
+- Ordinary Desktop/TUI support requires the native backend contract checked by
+  `desktop_host.py` (verified on Hermes 0.21.1, cores `b2aa855b` and `13c58042`). A missing
+  contract leaves delivery pending; it never redirects the result elsewhere.
 
 ## Install
 
@@ -98,17 +104,43 @@ plugins:
 
 There is deliberately no blocking wait tool.
 
+## Delivery by host
+
+| Host | Passive progress | Terminal continuation |
+|---|---|---|
+| Telegram/gateway | Existing native messaging adapter | Existing `inject_message(session_key=...)` |
+| Interactive CLI | Existing behavior; no fabricated messaging target | Owning CLI's pending-input/interrupt rail |
+| Ordinary Desktop/TUI | `notification.show` to the session's native transport | Native prompt admission in that same backend |
+
+Desktop waits until the current turn, queued human prompts and scheduled native
+continuation are clear. An absent owner does not spend the retry budget or block
+other sessions. Reopening a durable conversation (including its compression tip, in the same profile)
+can make pending delivery eligible again. A reused UI tab is not sufficient
+identity. The grant above also gates Desktop turns.
+
+Restart/reconnect the affected Desktop backend and reload other long-lived
+Hermes processes after upgrading this plugin. Existing Python processes retain
+their loaded code. Check active work before restarting; an already `accepted`
+or `uncertain` historic wake is not automatically replayed by an upgrade.
+
 ## Host internals
 
-Two files call Hermes internals rather than the documented `PluginContext`
+These files call Hermes internals rather than the documented `PluginContext`
 surface, because the public API exposes no equivalent:
 
 - `host_adapter.py` → `tools.send_message_tool` — the passive notification rail.
 - `lsp_check.py` → `agent.lsp.get_service` — semantic verification.
+- `desktop_host.py` → the already loaded `tui_gateway.server` session table,
+  native event transport and `_run_prompt_submit(..., terminal_callback=...)`.
+  It also checks the existing injection-grant predicate. This is a guarded
+  compatibility adapter, not official generic Desktop `inject_message` support.
+- `wake_worker.py` reads the context's manager to determine whether this process
+  actually has the gateway injector.
 
-Both are isolated to a single file and degrade to "unavailable" on any error,
-so a Hermes upgrade that moves them costs a feature, never a crash. Everything
-else uses documented APIs only.
+Hermes upgrades require rechecking these boundaries. Missing Desktop capability
+or session ownership leaves rows pending; uncertain admission requires diagnosis.
+No second backend is created to steal an owned session, no Bot Chat substitution
+is made, and the retired private completion queue is not restored.
 
 ## Development
 

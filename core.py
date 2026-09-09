@@ -336,7 +336,7 @@ def format_notification_message(kind: str, task_id: str, row: Dict[str, Any]) ->
 # Terminal continuation wake message
 #
 # Delivered by the plugin-owned TerminalWakeWorker (wake_worker.py) through
-# PluginContext.inject_message, into the task's OWN orchestrator session —
+# the matching native host adapter, into the task's OWN orchestrator session —
 # the one path in this plugin that may do that. The message is deliberately
 # small: task id, both state axes, the continuation id, and the instruction
 # to analyze and continue. No transcript, no diff, no Telegram-style body:
