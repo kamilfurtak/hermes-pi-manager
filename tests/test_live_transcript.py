@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from activity import ActivityRecorder, snapshot_path
-from live_transcript import TranscriptRecorder, transcript_path
+from live_transcript import TranscriptRecorder, transcript_path, read_transcript
 from test_pi_manager import wait_until
 
 
@@ -25,6 +25,66 @@ def output(value, tool_id='a', *, final=False, error=False):
     return {'type': 'tool_execution_end' if final else 'tool_execution_update',
             'toolCallId': tool_id, 'isError': error,
             'result' if final else 'partialResult': {'content': [{'type': 'text', 'text': value}]}}
+
+
+class DesktopTranscriptReadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.directory = Path(self.tmp.name)
+        self.path = transcript_path(self.directory, 'pi-one')
+
+    def test_incremental_read_waits_for_complete_utf8_lines_and_never_repeats(self):
+        self.path.write_bytes('polecenie\n'.encode())
+        first = read_transcript(self.directory, 'pi-one')
+        self.assertTrue(first['reset'])
+        self.assertEqual(first['text'], 'polecenie\n')
+        self.assertFalse(first['truncated'])
+        encoded = 'żółw 😀\n'.encode()
+        with self.path.open('ab') as stream:
+            stream.write(encoded[:-3])
+        partial = read_transcript(self.directory, 'pi-one', first['cursor'])
+        self.assertEqual(partial['text'], '')
+        self.assertEqual(partial['cursor'], first['cursor'])
+        with self.path.open('ab') as stream:
+            stream.write(encoded[-3:])
+        next_view = read_transcript(self.directory, 'pi-one', partial['cursor'])
+        self.assertEqual(next_view['text'], 'żółw 😀\n')
+        self.assertFalse(next_view['reset'])
+        self.assertEqual(read_transcript(self.directory, 'pi-one', next_view['cursor'])['text'], '')
+
+    def test_tail_and_slow_client_reset_are_bounded_and_start_on_a_line(self):
+        self.path.write_text('początek\n')
+        initial = read_transcript(self.directory, 'pi-one')
+        with self.path.open('a') as stream:
+            stream.write('żółw\n' * 20)
+        with patch('live_transcript.MAX_VIEW_BYTES', 31):
+            for cursor in ('', initial['cursor'], 'invalid', initial['cursor'].split(':')[0] + ':999999'):
+                view = read_transcript(self.directory, 'pi-one', cursor)
+                self.assertTrue(view['reset'])
+                self.assertTrue(view['truncated'])
+                self.assertLessEqual(len(view['text'].encode()), 31)
+                self.assertEqual(set(view['text'].splitlines()), {'żółw'})
+
+    def test_rotation_resets_cursor_even_when_the_new_file_has_the_same_length(self):
+        self.path.write_text('before\n')
+        first = read_transcript(self.directory, 'pi-one')
+        self.path.rename(self.path.with_suffix('.log.1'))
+        self.path.write_text('after!\n')
+        rotated = read_transcript(self.directory, 'pi-one', first['cursor'])
+        self.assertTrue(rotated['reset'])
+        self.assertTrue(rotated['truncated'])
+        self.assertEqual(rotated['text'], 'after!\n')
+
+    def test_absent_logs_create_nothing_and_symlinks_are_not_served(self):
+        absent = self.directory / 'absent'
+        self.assertEqual(read_transcript(absent, 'pi-one'), {'available': False})
+        self.assertFalse(absent.exists())
+        target = self.directory / 'not-a-transcript.txt'
+        target.write_text('private file')
+        self.path.symlink_to(target)
+        with self.assertRaises(OSError):
+            read_transcript(self.directory, 'pi-one')
 
 
 class TranscriptTests(unittest.TestCase):

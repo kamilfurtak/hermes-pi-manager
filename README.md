@@ -60,15 +60,26 @@ inside the assistant's start acknowledgement. `pi_task` supplies that directive
 for native Desktop/TUI origins. A Desktop with the frontend installed renders
 it; other clients retain their existing notices and terminal continuation.
 
-Expand **Pokaż przebieg** to read Pi's formatted messages. Completed tool results
-fold separately; the current tool output and errors open automatically. The final
-message appears once, using its longer text buffer instead of the clipped history
-copy. Desktop supplies the Markdown renderer, with a plain-text fallback on older
-SDKs. Updates arrive about once a second, including while the parent conversation
-is idle. This is a bounded recent view, not a complete transcript: long output is shortened and
-private thinking is excluded. The counter counts completed tool calls, not
-messages or an estimated percentage, including overlapping calls. Only the
-foreground tool streams partial output; other tools enter history when completed.
+Expand **Pokaż przebieg** to follow the same chronological log as the CLI:
+timestamps, executed commands/arguments, visible Pi messages, incremental output
+from each tool, durations and errors. Desktop uses its native `LogView` component.
+New complete lines arrive about once a second, including while the parent
+conversation is idle. Reading earlier lines pauses auto-scroll; **Do najnowszych**
+resumes it. Collapsing the card stops downloading log content; the compact status,
+latest message preview and completed-tool counter continue to refresh.
+
+The expanded view requests only new bytes after its last cursor, retains up to
+256 KiB of recent text and explicitly marks a reset after rotation or a display
+limit. Repeated cumulative RPC results do not duplicate output. A navigation or
+connection change discards in-flight replies. Polling waits for the final log
+flush as well as execution/verification settlement. This is a bounded display
+log, not an unbounded raw Pi session: private thinking is excluded and complete
+lines are redacted before publication.
+
+Older workers/backends without the new transcript retain the existing formatted
+recent-message view (eight history entries, foldable completed tool results and
+foreground-tool output). The counter always counts completed tool calls,
+including overlapping calls, not messages or an estimated percentage.
 Execution and verification stay separate.
 
 Buttons, status dots and tool logs use the corresponding Desktop SDK components;
@@ -167,6 +178,9 @@ the roster, **Enter** opens the selected live tail, **Esc** returns, and **F7**
 collapses the dock. Native subagents retain their original rows and controls.
 **s** queues guidance to Pi; **x**, then the native confirmation, stops it.
 Opening/closing the viewer preserves the composer draft and does not stop Pi.
+After successful attachment, `pi_task` tells the parent to end its turn without
+a separate startup acknowledgement, unless the user explicitly requested one.
+Older hosts retain the normal acknowledgement when attachment is unavailable.
 The native spinner refreshes activity about once a second even while the parent
 is idle or working on another request. Once no agents remain it stops repainting
 the idle prompt. No model turn is used for monitoring.
@@ -175,7 +189,10 @@ Only the owning CLI process and conversation (or its compression tip) receive
 Pi rows and notices. `/new`, a closed CLI or a foreign process cannot receive
 them. When the native view is available, progress receipts do not also print
 repeated messages above the prompt. Terminal notices still use the native
-renderer. On older hosts the existing passive text notices remain available.
+renderer, but wait until the inspector releases the terminal. They never cancel
+prompt_toolkit's shared terminal queue on a delivery timeout. This prevents a
+finished task from leaving a stale dock and hiding later conversation output.
+On older hosts the existing passive text notices remain available.
 Wakes wait for the parent, queued user input and native modals/inspector to clear;
 they enter the normal FIFO, never the interrupt queue. A scope guard checks the
 conversation again when a queued wake is consumed. A session switch can discard
@@ -188,7 +205,7 @@ same surviving process does not reload Python. Desktop frontend changes require
 copying/reloading its JS half as described above.
 
 All three views use the same bounded, redacted projection for compact status.
-The CLI inspector additionally tails an append-only event log: timestamps,
+The CLI inspector and expanded Desktop card additionally read an append-only event log: timestamps,
 executed tool arguments, visible assistant text, incremental tool output,
 per-tool durations and errors. Cumulative RPC tool updates are reconciled by
 call ID, so parallel tools and repeated snapshots do not duplicate output.

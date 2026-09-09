@@ -13,6 +13,13 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
 - Telegram: statusy w bieżącym czacie/temacie.
 - Desktop/TUI: natywne powiadomienia; w Desktop jeden toast na zadanie,
   zastępowany następnym i widoczny przez 20 sekund. To nie powiadomienie macOS.
+  Po aktualizacji backendu i pliku `desktop/plugin.js` rozwiń **Pokaż przebieg**:
+  mają pojawiać się komendy, godziny i kolejne linie wyniku przed zakończeniem
+  narzędzia. Przewiń wstecz: dopisywanie nie może przestawić widoku. Przycisk
+  **Do najnowszych** ma wznowić śledzenie. Zwiń kartę i wyślij inną wiadomość
+  Hermesowi; statusy mają nadal działać. Przełącz rozmowę/profil: stary dziennik
+  nie może zostać pokazany w nowej rozmowie. Starsze zadania bez dziennika
+  zachowują skrócony podgląd wiadomości i narzędzi.
 - Klasyczny interaktywny CLI: aktualizowany natywny panel subagentów przy polu
   wpisywania. `Ctrl+T` / `F6` otwiera listę, `Enter` podgląd strumienia,
   `Esc` wraca, `F7` zwija panel. Wpisz szkic wiadomości, otwórz i zamknij
@@ -26,6 +33,12 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
   Dziennik ma rosnąć; powtarzane częściowe wyniki RPC nie mogą dublować linii.
   Testuj komendą wypisującą tekst co kilka sekund, np. pętlą `printf` i `sleep`.
   Samo `sleep`, które wypisuje wynik dopiero na końcu, nie testuje strumieniowania.
+  Zostaw podgląd otwarty także przez co najmniej 10 sekund po zakończeniu Pi.
+  Następnie zamknij go przez `Esc` → `Esc` i wyślij `Ile wynosi 5 × 5?`.
+  Końcowe powiadomienie i odpowiedź mają być widoczne w rozmowie, a zakończony
+  Pi ma zniknąć z panelu. Nie powinno być wielokrotnych prób drukowania nad
+  otwartym podglądem. Aby sprawdzić cichy start, pomiń w poniższym prompcie
+  polecenie wypisania `task_id` — jawne żądanie identyfikatora nadal wygrywa.
 
 ## Prompt do wklejenia
 

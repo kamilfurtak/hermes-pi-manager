@@ -11,6 +11,10 @@ _spec = importlib.util.spec_from_file_location(
     "pi_manager_activity_api", Path(__file__).resolve().parents[1] / "activity.py")
 _view = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_view)
+_transcript_spec = importlib.util.spec_from_file_location(
+    "pi_manager_transcript_api", Path(__file__).resolve().parents[1] / "live_transcript.py")
+_transcript = importlib.util.module_from_spec(_transcript_spec)
+_transcript_spec.loader.exec_module(_transcript)
 router = APIRouter()
 
 
@@ -28,12 +32,22 @@ def _profile_home(profile):
 
 @router.get("/activity")
 def activity(response: Response, task_id: str = Query(min_length=1, max_length=160),
-             session_id: str = Query(min_length=1, max_length=200), profile: str = ""):
+             session_id: str = Query(min_length=1, max_length=200), profile: str = "",
+             transcript: bool = False, cursor: str = Query(default="", max_length=100)):
     response.headers["Cache-Control"] = "no-store"
     home = _profile_home(profile)
     try:
-        return _view.read_activity(home, task_id, session_id)
+        result = _view.read_activity(home, task_id, session_id)
     except (KeyError, FileNotFoundError):
         raise HTTPException(404, "Pi task is not available in this conversation") from None
     except (sqlite3.Error, OSError, ValueError, TypeError):
         raise HTTPException(503, "Pi live view is temporarily unavailable") from None
+    # Authorization above applies equally to the richer log. A display-file
+    # failure must not hide the task's execution/verification status.
+    if transcript:
+        try:
+            result["transcript"] = _transcript.read_transcript(
+                Path(home) / "state" / "pi-manager" / "cli-transcripts", task_id, cursor)
+        except OSError:
+            result["transcript"] = {"available": False, "error": "Dziennik chwilowo niedostępny. Ponawiam odczyt…"}
+    return result

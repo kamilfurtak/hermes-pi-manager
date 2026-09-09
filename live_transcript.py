@@ -1,4 +1,4 @@
-"""Private, append-only Pi event log for the native Hermes CLI tail viewer.
+"""Private, append-only Pi event log for the native CLI and Desktop viewers.
 
 Only visible text and executed tool calls enter this projection. The RPC reader
 updates bounded memory; ActivityRecorder's existing writer performs all I/O.
@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import stat
 import threading
 import time
 import unicodedata
@@ -26,12 +27,53 @@ MAX_RECORD_CHARS = 65536
 MAX_PENDING_CHARS = 262144
 MAX_PENDING_RECORDS = 1024
 MAX_LOG_BYTES = 2 * 1024 * 1024
+MAX_VIEW_BYTES = 256 * 1024
 RETENTION_SECONDS = 7 * 86400
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def transcript_path(directory, task_id):
     return Path(directory) / (hashlib.sha256(task_id.encode()).hexdigest() + '.log')
+
+
+def read_transcript(directory, task_id, cursor=''):
+    """Read complete UTF-8 lines after an opaque cursor, or a bounded tail.
+
+    The caller must authorize the task/conversation before opening this file.
+    An inode change (rotation), invalid cursor or lag beyond the display bound
+    resets the window explicitly. No writer, manager or task state is created.
+    """
+    path = transcript_path(directory, task_id)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {'available': False}
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError('Transcript is not a regular file')
+        generation = f'{info.st_dev:x}-{info.st_ino:x}'
+        match = re.fullmatch(r'([a-f0-9]+-[a-f0-9]+):([0-9]{1,20})', cursor)
+        offset = int(match[2]) if match else -1
+        resume = (match is not None and match[1] == generation
+                  and 0 <= offset <= info.st_size
+                  and info.st_size - offset <= MAX_VIEW_BYTES)
+        start = offset if resume else max(0, info.st_size - MAX_VIEW_BYTES)
+        # Drop a leading fragment if a bounded tail begins inside a line.
+        stream.seek(max(0, start - 1))
+        boundary = start == 0 or stream.read(1) == b'\n'
+        raw = stream.read(min(MAX_VIEW_BYTES, info.st_size - start))
+        if not boundary:
+            cut = raw.find(b'\n') + 1
+            start += cut
+            raw = raw[cut:]
+        # An append may still be in progress. Leave its unfinished line for
+        # the next poll instead of splitting a character or publishing twice.
+        raw = raw[:raw.rfind(b'\n') + 1]
+        return {'available': True, 'text': raw.decode('utf-8', errors='replace'),
+                'cursor': f'{generation}:{start + len(raw)}', 'reset': not resume,
+                'truncated': not resume and (start > 0 or bool(cursor)
+                                             or path.with_suffix('.log.1').exists())}
 
 
 def _visible(message):

@@ -97,7 +97,7 @@ test('React card renders live tool output as text and clears on profile switch',
     await act(async () => { state.profile.set('other'); });
     assert.doesNotMatch(document.body.textContent, /line 1/);
     assert.match(document.body.textContent, /wstrzymany/);
-    assert.equal(calls, 1);
+    assert.equal(calls, 2, 'expanding starts the transcript request; switching profile stops it');
   } finally {
     await act(async () => root.unmount());
     state.profile.set('default');
@@ -201,6 +201,111 @@ test('Markdown cannot execute HTML or fetch worker-provided images', async () =>
     assert.equal(document.querySelectorAll('a[href^="javascript:"]').length, 0);
   } finally {
     await act(async () => root.unmount());
+    dom.window.close();
+  }
+});
+
+test('expanded polling appends only new log chunks and waits for the terminal log flush', async () => {
+  const responses = [
+    { cursor: 'f:10', text: 'COMMAND\nfirst line\n', reset: true },
+    { cursor: 'f:20', text: 'second line\n', reset: false },
+    { cursor: 'f:30', text: 'result: OK\n', reset: false },
+    { cursor: 'f:30', text: '', reset: false },
+  ];
+  const received = [], urls = [];
+  const stop = pollActivity({ taskId: 'pi-test', sessionId: 'session-a', interval: 5, includeTranscript: true,
+    rest: async url => {
+      urls.push(url);
+      return view({ execution_state: urls.length > 1 ? 'SETTLED' : 'TOOL_RUNNING',
+        transcript: { available: true, ...responses[urls.length - 1] } });
+    }, onData: data => received.push(data), onError: assert.fail });
+  try {
+    await sleep(80);
+    assert.equal(urls.length, 4);
+    assert.match(urls[0], /transcript=true&cursor=$/);
+    assert.match(urls[1], /cursor=f%3A10$/);
+    assert.equal(received[0].execution_state, 'TOOL_RUNNING');
+    assert.equal(received.at(-1).transcript.text, 'COMMAND\nfirst line\nsecond line\nresult: OK\n');
+  } finally { stop(); }
+});
+
+test('an older backend keeps the working compact view and explicitly requests a reload', async () => {
+  let received;
+  const stop = pollActivity({ taskId: 'pi-test', sessionId: 'session-a', includeTranscript: true,
+    rest: async () => view(), onData: data => { received = data; }, onError: assert.fail });
+  try {
+    await sleep(5);
+    assert.equal(received.activity.text, 'First chunk');
+    assert.equal(received.transcript.available, false);
+    assert.equal(received.transcript.legacy_backend, true);
+  } finally { stop(); }
+});
+
+test('long transcripts stay bounded, survive read errors and reset explicitly on rotation', async () => {
+  const responses = [
+    { available: true, cursor: 'f:1', text: 'old line\n'.repeat(30000), reset: true },
+    { available: false, error: 'Dziennik niedostępny' },
+    { available: true, cursor: 'g:1', text: 'new generation\n', reset: true, truncated: true },
+    { available: true, cursor: 'g:1', text: '', reset: false },
+  ];
+  const received = [];
+  const stop = pollActivity({ taskId: 'pi-test', sessionId: 'session-a', interval: 5, includeTranscript: true,
+    rest: async () => view({ execution_state: 'SETTLED', transcript: responses[received.length] }),
+    onData: data => received.push(data), onError: assert.fail });
+  try {
+    await sleep(80);
+    assert.equal(received.length, 4);
+    assert.ok(received[0].transcript.text.length <= 256 * 1024);
+    assert.equal(received[0].transcript.truncated, true);
+    assert.equal(received[1].transcript.text, received[0].transcript.text);
+    assert.equal(received[1].transcript.error, 'Dziennik niedostępny');
+    assert.equal(received.at(-1).transcript.text, 'new generation\n');
+    assert.equal(received.at(-1).transcript.truncated, true);
+    assert.equal(received.at(-1).transcript.error, undefined);
+  } finally { stop(); }
+});
+
+test('live log follows output, preserves manual scroll, and disappears on conversation change', async () => {
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost' });
+  globalThis.window = dom.window;
+  globalThis.document = dom.window.document;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  piTestSdk.LogView = props => h('div', { ...props, 'data-native-log': true });
+  const root = createRoot(document.getElementById('root'));
+  let text = 'command\n<script>unsafe()</script>\n' + 'output\n'.repeat(40);
+  let requestedTail = false;
+  const ctx = () => ({ rest: async url => {
+    requestedTail = url.includes('transcript=true');
+    return view({ transcript: requestedTail ? { available: true, text, cursor: `f:${text.length}`, reset: true } : undefined });
+  } });
+  try {
+    await act(async () => root.render(h(PiCard, { ctx: ctx(), taskId: 'pi-test' })));
+    assert.equal(requestedTail, false, 'the compact card does not download a transcript');
+    await act(async () => document.querySelector('button').click());
+    assert.equal(requestedTail, true);
+    const log = document.querySelector('[role="log"]');
+    assert.match(document.querySelector('[data-native-log]').textContent, /command/);
+    assert.equal(document.querySelectorAll('script').length, 0);
+    let height = 1000;
+    Object.defineProperty(log, 'scrollHeight', { get: () => height });
+    Object.defineProperty(log, 'clientHeight', { value: 200 });
+    text += 'new output\n';
+    await act(async () => root.render(h(PiCard, { ctx: ctx(), taskId: 'pi-test' })));
+    assert.equal(log.scrollTop, 1000);
+    await act(async () => { log.scrollTop = 100; log.dispatchEvent(new dom.window.Event('scroll')); });
+    height = 1200;
+    text += 'later output\n';
+    await act(async () => root.render(h(PiCard, { ctx: ctx(), taskId: 'pi-test' })));
+    assert.equal(log.scrollTop, 100, 'new output must not steal the reading position');
+    await act(async () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Do najnowszych').click());
+    assert.equal(log.scrollTop, 1200);
+    await act(async () => state.focusedStoredSessionId.set('session-other'));
+    assert.equal(document.querySelector('[role="log"]'), null);
+    assert.doesNotMatch(document.body.textContent, /later output/);
+  } finally {
+    await act(async () => root.unmount());
+    state.focusedStoredSessionId.set('session-a');
+    delete piTestSdk.LogView;
     dom.window.close();
   }
 });

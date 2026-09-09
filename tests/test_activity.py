@@ -178,9 +178,53 @@ class ActivityReadTests(unittest.TestCase):
             self.assertEqual(client.get("/api/plugins/pi-manager/activity", params={
                 "task_id": "pi-view", "session_id": "foreign"}).status_code, 404)
             self.assertEqual(client.post("/api/plugins/pi-manager/activity").status_code, 405)
+            from live_transcript import TranscriptRecorder
+            recorder = TranscriptRecorder(self.registry.path.parent / 'cli-transcripts',
+                                          lambda text: text.replace('secret-token', '[redacted]'))
+            recorder.observe('pi-view', {'type': 'tool_execution_start', 'toolCallId': 'a',
+                                        'toolName': 'bash', 'args': {'command': 'printf secret-token'}}, 1)
+            recorder.observe('pi-view', {'type': 'tool_execution_update', 'toolCallId': 'a',
+                                        'partialResult': {'content': 'output before tool completion\n'}}, 2)
+            recorder.flush()
+            params = {'task_id': 'pi-view', 'session_id': 'parent', 'transcript': 'true'}
+            full = client.get('/api/plugins/pi-manager/activity', params=params)
+            self.assertEqual(full.status_code, 200)
+            self.assertEqual(full.headers['cache-control'], 'no-store')
+            data = full.json()
+            self.assertIn('printf [redacted]', data['transcript']['text'])
+            self.assertIn('output before tool completion', data['transcript']['text'])
+            self.assertNotIn('secret-token', full.text)
+            self.assertEqual(client.get('/api/plugins/pi-manager/activity', params={
+                **params, 'cursor': data['transcript']['cursor']}).json()['transcript']['text'], '')
+            self.assertNotIn('transcript', client.get('/api/plugins/pi-manager/activity', params={
+                'task_id': 'pi-view', 'session_id': 'parent'}).json(), 'collapsed cards do not read logs')
+            with patch.object(api._transcript, 'read_transcript', side_effect=AssertionError('foreign log opened')):
+                self.assertEqual(client.get('/api/plugins/pi-manager/activity', params={
+                    **params, 'session_id': 'foreign'}).status_code, 404)
+            with patch.object(api._transcript, 'read_transcript', side_effect=OSError('display unavailable')):
+                broken = client.get('/api/plugins/pi-manager/activity', params=params).json()
+                self.assertEqual(broken['task_id'], 'pi-view')
+                self.assertIn('error', broken['transcript'])
 
 
 class ManagerActivityTests(PiManagerTestCase):
+    def test_cli_start_is_silent_only_after_native_monitor_attaches(self):
+        import tools
+        from unittest.mock import Mock
+        for attached in (True, False):
+            with self.subTest(attached=attached):
+                manager = Mock()
+                manager.start_task.return_value = {'task_id': 'pi-card', 'execution_state': 'STARTING'}
+                with patch.object(tools, 'get_manager', return_value=manager), patch.object(
+                        tools, '_capture_routing', return_value={'cli_session_id': 'parent'}), patch.object(
+                        tools.cli_host, 'ensure_monitor', return_value=attached):
+                    result = json.loads(tools.handle_pi_task({'prompt': 'test', 'cwd': str(self.cwd_dir)}))
+                self.assertEqual('cli_live_view' in result, attached)
+                self.assertNotIn('desktop_live_view', result)
+                if attached:
+                    self.assertIn('without a separate startup/status message', result['cli_live_view']['instruction'])
+                    self.assertIn('unless the user explicitly requested one', result['cli_live_view']['instruction'])
+
     def test_start_ack_supplies_desktop_card_without_polling_or_notifications(self):
         import tools
         from unittest.mock import Mock

@@ -1,5 +1,6 @@
 """Passive CLI delivery: real prompt_toolkit loop, isolated DB, no model."""
 import json
+import asyncio
 import queue
 import threading
 from types import SimpleNamespace
@@ -137,6 +138,78 @@ class TestCLIDelivery(OutboxTestCase):
         self.assertEqual(consumed, [])
         self.cli._tui_process_one_input('human message')
         self.assertEqual(consumed, ['human message'])
+
+    def test_terminal_notice_waits_for_inspector_without_poisoning_future_prints(self):
+        from prompt_toolkit.application import in_terminal, run_in_terminal
+        from prompt_toolkit.application.current import set_app
+        from test_pi_manager import wait_until
+
+        opened = threading.Event()
+        release = None
+        self.cli._subagent_monitor = SimpleNamespace(opening=True, app=None)
+
+        async def inspect():
+            nonlocal release
+            with set_app(self.app):
+                async with in_terminal():
+                    release = asyncio.Event()
+                    self.cli._subagent_monitor.app = object()
+                    opened.set()
+                    await release.wait()
+            self.cli._subagent_monitor.app = None
+            self.cli._subagent_monitor.opening = False
+
+        inspector = asyncio.run_coroutine_threadsafe(inspect(), self.app.loop)
+        self.assertTrue(opened.wait(3))
+        owner = self.app._running_in_terminal_f
+        nid = self.enqueue(kind='verifier', message='Pi: testy PASS')
+        try:
+            self.assertEqual(self.worker.run_once(), 0)
+            self.assertEqual(self.registry.get_notification(nid)['attempts'], 0)
+            self.assertIs(self.app._running_in_terminal_f, owner)
+            self.assertFalse(owner.cancelled())
+        finally:
+            self.app.loop.call_soon_threadsafe(release.set)
+            inspector.result(3)
+        self.assertEqual(self.worker.run_once(), 1)
+        self.assertIn('testy PASS', self.prints[0][0][0])
+
+        async def next_response():
+            with set_app(self.app):
+                await run_in_terminal(lambda: self.cli._console_print('5 × 5 = 25'))
+        asyncio.run_coroutine_threadsafe(next_response(), self.app.loop).result(3)
+        self.assertTrue(wait_until(lambda: any('25' in str(p) for p in self.prints)))
+
+    def test_timeout_during_terminal_ownership_race_does_not_cancel_the_print_queue(self):
+        from prompt_toolkit.application import run_in_terminal
+        from test_pi_manager import wait_until
+        from concurrent.futures import TimeoutError
+
+        previous = None
+        nid = self.enqueue(kind='verifier', message='Pi: recovered queue')
+
+        def race(display):
+            nonlocal previous
+            # A competing terminal owner arrives after our UI-loop check.
+            previous = self.app.loop.create_future()
+            self.app._running_in_terminal_f = previous
+            return run_in_terminal(display)
+
+        with patch('prompt_toolkit.application.run_in_terminal', race):
+            with self.assertRaises(TimeoutError):
+                cli_host.emit_status(self.origin, 'Pi: recovered queue', nid, kind='verifier')
+        try:
+            self.assertFalse(previous.cancelled(), 'timeout must not cancel the prior terminal owner')
+            self.assertFalse(cli_host.available(self.origin), 'do not enqueue retries behind an active terminal owner')
+        finally:
+            if not previous.done():
+                self.app.loop.call_soon_threadsafe(previous.set_result, None)
+        self.assertTrue(wait_until(lambda: len(self.prints) == 1))
+        self.assertTrue(wait_until(lambda: cli_host.available(self.origin)))
+        self.assertTrue(cli_host.emit_status(self.origin, 'duplicate', nid)['duplicate'])
+        cli_host.emit_status(self.origin, 'NEXT RESPONSE VISIBLE', 'next')
+        self.assertEqual(len(self.prints), 2)
+        self.assertIn('NEXT RESPONSE VISIBLE', self.prints[-1][0][0])
 
     def test_wake_worker_defers_busy_without_attempts_then_accepts_once(self):
         from core import HOST_RUNTIME_ID

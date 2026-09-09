@@ -67,21 +67,22 @@ def _target(origin: dict, *, idle=True):
     return cli, app, loop
 
 
-def ensure_monitor(manager) -> None:
+def ensure_monitor(manager) -> bool:
     cli = getattr(_manager, "_cli_ref", None)
     app = getattr(cli, "_app", None)
     loop = getattr(app, 'loop', None)
     native = getattr(cli, "_subagent_monitor", None)
     if (app is None or not app.is_running or loop is None or not loop.is_running() or native is None or
             not all(callable(getattr(native, key, None)) for key in ('refresh', 'control', 'dock_text'))):
-        return  # Older host: ordinary passive notices remain available.
+        return False  # Older host: ordinary passive notices remain available.
 
     def attach():
         global _monitor
         if cli is not getattr(_manager, '_cli_ref', None):
-            return
+            return False
         if _monitor is not None and _monitor.cli is cli and not _monitor.closed:
-            return
+            _monitor.refresh()
+            return True
         try:
             try:
                 from .cli_monitor import Monitor
@@ -91,6 +92,7 @@ def ensure_monitor(manager) -> None:
                 _monitor.close()
             _monitor = Monitor(cli, manager, lambda origin: owns(cli, origin))
             _monitor.attach()
+            return True
         except Exception:
             if _monitor is not None:
                 try:
@@ -98,10 +100,21 @@ def ensure_monitor(manager) -> None:
                 except Exception:
                     pass
             _monitor = None
+            return False
     try:
-        loop.call_soon_threadsafe(attach)
-    except RuntimeError:
-        pass  # CLI teardown cannot change the already-started task's result.
+        try:
+            if asyncio.get_running_loop() is loop:
+                return attach()
+        except RuntimeError:
+            pass
+        # A tool caller may omit its startup message only after the native
+        # view actually attached, not merely after scheduling an attempt.
+        from concurrent.futures import Future
+        ready = Future()
+        loop.call_soon_threadsafe(lambda: ready.set_result(attach()))
+        return ready.result(timeout=2)
+    except Exception:
+        return False  # CLI teardown cannot change the already-started task's result.
 
 
 def stop_monitor():
@@ -117,7 +130,22 @@ def stop_monitor():
 
 
 def available(origin: dict) -> bool:
-    return _target(origin) is not None
+    target = _target(origin)
+    return target is not None and not _terminal_busy(target[0], target[1])
+
+
+def _terminal_busy(cli, app):
+    """Do not queue a timed notification behind a full-screen inspector.
+
+    Cancelling prompt_toolkit's in_terminal() while it awaits the previous
+    owner can leave an unresolved future in the shared terminal queue. The
+    agent keeps answering but all subsequent scrollback prints then stall.
+    """
+    native = getattr(cli, '_subagent_monitor', None)
+    pending = getattr(app, '_running_in_terminal_f', None)
+    return bool(getattr(native, 'opening', False) or getattr(native, 'app', None)
+                or getattr(app, '_running_in_terminal', False)
+                or (pending is not None and not pending.done()))
 
 
 def emit_status(origin: dict, message: str, notification_id: str, *, kind="") -> dict:
@@ -125,6 +153,8 @@ def emit_status(origin: dict, message: str, notification_id: str, *, kind="") ->
     if target is None:
         raise RuntimeError("CLI session owner is not available")
     cli, app, loop = target
+    if _terminal_busy(cli, app):
+        raise RuntimeError('CLI terminal is owned by another view')
     task_id = notification_id[5:].rsplit(':', 1)[0] if notification_id.startswith('prog:') else None
     if (kind == 'progress' and _monitor is not None and not _monitor.closed and _monitor.cli is cli):
         registry = getattr(_monitor, 'registry', None)
@@ -162,7 +192,12 @@ def emit_status(origin: dict, message: str, notification_id: str, *, kind="") ->
             return {"success": True}
 
         with set_app(app):
-            return await run_in_terminal(display)
+            # Recheck before joining the terminal queue on its owning loop.
+            # Shield the queue operation if another owner wins the remaining
+            # scheduling race: a delivery timeout must never cancel its chain.
+            if _terminal_busy(cli, app):
+                raise RuntimeError('CLI terminal became busy before notification display')
+            return await asyncio.shield(run_in_terminal(display))
 
     future = asyncio.run_coroutine_threadsafe(render(), loop)
     try:
@@ -185,7 +220,7 @@ def can_wake(origin):
         return False
     cli = target[0]
     native = getattr(cli, '_subagent_monitor', None)
-    return (not getattr(cli, '_command_running', False) and
+    return (not _terminal_busy(cli, target[1]) and not getattr(cli, '_command_running', False) and
             not getattr(native, 'opening', False) and
             not getattr(native, 'app', None) and
             not any(getattr(cli, key, None) for key in (

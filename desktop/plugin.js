@@ -1,4 +1,4 @@
-import { createElement as h, useEffect, useState, useSyncExternalStore } from 'react';
+import { createElement as h, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as sdk from '@hermes/plugin-sdk';
 
 const { host, TRANSCRIPT_DIRECTIVE_AREA } = sdk;
@@ -15,6 +15,7 @@ const pre = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12, li
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', margin: '8px 0 0', padding: '10px 12px',
   maxHeight: 260, overflow: 'auto', background: 'transparent', color: 'inherit', border: box.border, borderRadius: 6, boxShadow: 'none' };
 const OMITTED = '[… wcześniejszy tekst pominięty …]\n';
+const MAX_TRANSCRIPT_CHARS = 256 * 1024;
 const TOOL_NAMES = { bash: 'Terminal', read: 'Odczyt pliku', edit: 'Edycja pliku', write: 'Zapis pliku',
   grep: 'Wyszukiwanie w plikach', find: 'Wyszukiwanie plików', ls: 'Lista plików' };
 const proseStyles = `
@@ -96,6 +97,49 @@ function ActivityTimeline({ activity, finished }) {
   );
 }
 
+function LiveTranscript({ transcript }) {
+  const scroll = useRef(null);
+  const follow = useRef(true);
+  const [following, setFollowing] = useState(true);
+  const latest = () => {
+    follow.current = true;
+    setFollowing(true);
+    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  };
+  useLayoutEffect(() => {
+    if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  }, [transcript.text]);
+  return h('div', { style: { marginTop: 14, borderTop: box.border, paddingTop: 12 } },
+    h('div', { style: { ...muted, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 8 } },
+      h('span', null, following ? 'Przebieg · śledzenie najnowszych wpisów' : 'Przebieg · czytasz wcześniejsze wpisy'),
+      !following ? h(sdk.Button || 'button', { type: 'button', onClick: latest,
+        ...(sdk.Button ? { variant: 'text', size: 'micro' } : {}) }, 'Do najnowszych') : null),
+    transcript.truncated ? h('p', { style: muted }, 'Wyświetlono końcową część dziennika; wcześniejsze wpisy przekroczyły limit podglądu.') : null,
+    h('div', { ref: scroll, tabIndex: 0, role: 'log', 'aria-label': 'Dziennik pracy Pi', 'aria-live': 'off',
+      'data-selectable-text': 'true',
+      style: { maxHeight: 'min(55vh, 520px)', overflow: 'auto', overflowAnchor: 'none', border: box.border, borderRadius: 6 },
+      onScroll: event => {
+        const el = event.currentTarget;
+        follow.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+        setFollowing(follow.current);
+      } },
+      h(sdk.LogView || 'pre', { style: { ...(!sdk.LogView ? pre : {}),
+        margin: 0, maxHeight: 'none', overflow: 'visible', border: 0,
+        whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+      transcript.text || 'Oczekiwanie na pierwsze wpisy…')),
+  );
+}
+
+function mergeTranscript(previous, update) {
+  if (update.error) return { ...(previous || update), error: update.error };
+  if (!update.available) return update;
+  const text = (update.reset ? '' : previous?.text || '') + update.text;
+  const clipped = text.length > MAX_TRANSCRIPT_CHARS;
+  const tail = clipped ? text.slice(-MAX_TRANSCRIPT_CHARS) : text;
+  return { ...update, text: clipped ? tail.slice(tail.indexOf('\n') + 1) : tail,
+    truncated: update.truncated || (!update.reset && previous?.truncated) || clipped };
+}
+
 function useAtom(atom) {
   return useSyncExternalStore(
     callback => atom?.listen?.(callback) || (() => {}),
@@ -104,22 +148,31 @@ function useAtom(atom) {
 }
 
 /** Cancel scheduling and discard in-flight replies on navigation/unload. */
-export function pollActivity({ rest, taskId, sessionId, onData, onError, interval = 1000 }) {
+export function pollActivity({ rest, taskId, sessionId, onData, onError, interval = 1000, includeTranscript = false }) {
   let stopped = false;
   let timer;
   let terminalSnapshot;
+  let transcript;
   async function tick() {
     let delay = interval;
     let done = false;
     try {
-      const data = await rest(`/activity?task_id=${encodeURIComponent(taskId)}&session_id=${encodeURIComponent(sessionId)}`, { timeoutMs: 5000 });
+      const tail = includeTranscript ? `&transcript=true&cursor=${encodeURIComponent(transcript?.cursor || '')}` : '';
+      const data = await rest(`/activity?task_id=${encodeURIComponent(taskId)}&session_id=${encodeURIComponent(sessionId)}${tail}`, { timeoutMs: 5000 });
       if (stopped) return;
       if (data?.task_id !== taskId || data?.session_id !== sessionId) throw new Error('Odpowiedź pochodzi z innego zadania.');
+      if (includeTranscript && data.transcript) {
+        transcript = mergeTranscript(transcript, data.transcript);
+        data.transcript = transcript;
+      } else if (includeTranscript) {
+        data.transcript = { available: false, legacy_backend: true };
+      }
       onData(data);
       // The task row can settle just before the coalescing writer flushes.
       // Observe two identical terminal snapshots before stopping the poll.
-      const terminal = FINAL.has(data.execution_state) && data.verification_state !== 'PENDING';
-      const signature = JSON.stringify([data.execution_state, data.verification_state, data.activity?.seq]);
+      const terminal = FINAL.has(data.execution_state) && data.verification_state !== 'PENDING' && !transcript?.error;
+      const signature = JSON.stringify([data.execution_state, data.verification_state, data.activity?.seq,
+        transcript?.available, transcript?.cursor]);
       done = terminal && signature === terminalSnapshot;
       terminalSnapshot = terminal ? signature : undefined;
     } catch {
@@ -153,12 +206,12 @@ export function PiCard({ ctx, taskId }) {
   useEffect(() => {
     if (!valid || paused) return;
     const stop = pollActivity({
-      rest: ctx.rest, taskId, sessionId,
+      rest: ctx.rest, taskId, sessionId, includeTranscript: expanded,
       onData: data => setView({ scope, data, error: null }),
       onError: error => setView(previous => ({ scope, data: previous?.scope === scope ? previous.data : null, error })),
     });
     return stop;
-  }, [ctx, scope, valid, paused]);
+  }, [ctx, scope, valid, paused, expanded]);
 
   if (!valid) return h('p', { style: muted }, 'Nieprawidłowy identyfikator zadania Pi.');
   const data = current?.data;
@@ -187,10 +240,15 @@ export function PiCard({ ctx, taskId }) {
       updated ? ` · ostatnia aktywność ${updated}` : ''),
     data?.active_tool ? h('div', { style: { fontSize: 13, marginTop: 6 } }, `Narzędzie: ${data.active_tool}`) : null,
     current?.error ? h('p', { role: 'status', style: muted }, current.error) : null,
+    expanded && data?.transcript?.error ? h('p', { role: 'status', style: muted }, data.transcript.error) : null,
+    expanded && data?.transcript?.legacy_backend ? h('p', { role: 'status', style: muted },
+      'Ten backend udostępnia jeszcze skrócony podgląd. Uruchom ponownie backend Hermesa, aby wczytać nowy dziennik.') : null,
     !paused && data && !activity ? h('p', { style: muted }, 'Brak zapisu strumienia dla tego zadania. Nowy worker utworzy podgląd po załadowaniu dodatku przez backend.') : null,
     !expanded && summary ? h('p', { style: { fontSize: 13, overflowWrap: 'anywhere', marginTop: 8 } },
       summary.length > 240 ? summary.slice(0, 239) + '…' : summary) : null,
-    expanded && activity ? h(ActivityTimeline, { activity, finished }) : null,
+    expanded ? data?.transcript?.available
+      ? h(LiveTranscript, { key: scope, transcript: data.transcript })
+      : activity ? h(ActivityTimeline, { activity, finished }) : null : null,
     finished ? h('div', { style: { ...muted, marginTop: 8 } },
       data.verification_state === 'PENDING' ? 'Weryfikacja w toku…'
         : data.verification_state === 'NOT_RUN' ? 'Weryfikator: nie uruchamiano'
@@ -201,7 +259,7 @@ export function PiCard({ ctx, taskId }) {
 export default {
   id: 'pi-manager',
   name: 'Pi · przebieg pracy',
-  description: 'Bieżący tekst i wyjście narzędzi Pi w karcie rozmowy.',
+  description: 'Status Pi i narastający dziennik komend, komunikatów i wyników narzędzi.',
   register(ctx) {
     ctx.register({ id: 'live', area: TRANSCRIPT_DIRECTIVE_AREA, data: {
       name: 'pi-live',
