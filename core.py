@@ -217,7 +217,7 @@ def _first_text(parts: List[Any], limit: int) -> str:
 # These strings ARE the chat message: they are delivered to Kamil in
 # Telegram, in Polish. Every part is bounded (the outbox additionally caps
 # the whole body). Policy:
-#   - concise and useful: the task id, step count, elapsed time, the real
+#   - concise and useful: the task id, active tool, elapsed time, the real
 #     verdict (or an explicit "nothing was checked"), and error facts stay;
 #   - no raw orchestrator meta ("still working: RUNNING, 55 messages"), no
 #     internal instructions (call pi_status/pi_digest), no async-delegation
@@ -226,17 +226,6 @@ def _first_text(parts: List[Any], limit: int) -> str:
 # The formatters live here (not in tools.py) so the exact chat text is
 # unit-testable without a Hermes runtime.
 # ---------------------------------------------------------------------------
-
-
-def _krok_word(count: int) -> str:
-    """Polish plural of 'krok' (step): 1 krok, 2-4 kroki, 5+ kroków, with
-    the 11-14 → kroków exception (11, 12, 13, 14, 21...)."""
-    n = abs(int(count))
-    if n % 10 == 1 and n % 100 != 11:
-        return "krok"
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return "kroki"
-    return "kroków"
 
 
 _VERDICT_PHRASES = {
@@ -266,9 +255,9 @@ def format_completion_message(task_id: str, row: Dict[str, Any]) -> str:
         f"Pi zakończył zadanie `{task_id}`.",
         _VERDICT_PHRASES.get(verification, _NO_VERIFIER_PHRASE),
     ]
-    count = int(row.get("message_count") or 0)
-    if count:
-        parts.append(f"Wykonano {count} {_krok_word(count)}.")
+    # message_count includes prompts and replies, not completed work. The
+    # Desktop activity card counts tool calls separately; notices must not
+    # turn conversation length into an invented step count.
     rt = _runtime_phrase(row)
     if rt:
         parts.append(f"Czas: {rt}.")
@@ -307,15 +296,12 @@ def format_stalled_message(task_id: str, row: Dict[str, Any]) -> str:
 
 
 def format_progress_message(task_id: str, row: Dict[str, Any]) -> str:
-    """The progress notice: what the task is doing and how far it got. The
+    """The progress notice: what the task is doing. The
     tool/activity clause is omitted when no activity data is available."""
-    count = int(row.get("message_count") or 0)
-    text = (f"Pi pracuje nad zadaniem `{task_id}` — "
-            f"wykonano {count} {_krok_word(count)}.")
+    text = f"Pi pracuje nad zadaniem `{task_id}`."
     active_tool = row.get("active_tool")
     if active_tool:
-        text += f" Ostatnia aktywność: {bound(str(active_tool), 120)}."
-    text += " Task nadal działa."
+        text += f" Aktywne narzędzie: {bound(str(active_tool), 120)}."
     return text
 
 

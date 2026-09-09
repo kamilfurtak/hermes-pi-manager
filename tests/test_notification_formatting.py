@@ -2,7 +2,7 @@
 
 These are the exact strings delivered to Kamil in Telegram, so they are
 tested directly, off the full manager machinery: Polish, concise, factual
-(task id, step count, elapsed time, verdict, exit code, last error) and free
+(task id, active tool, elapsed time, verdict, exit code, last error) and free
 of raw orchestrator meta, internal tool-call instructions, and internal
 paths.
 """
@@ -21,7 +21,6 @@ from core import (  # noqa: E402
     VERIFY_NOT_RUN,
     VERIFY_PASS,
     VERIFY_UNRUNNABLE,
-    _krok_word,
     format_failed_message,
     format_progress_message,
     format_stalled_message,
@@ -29,18 +28,6 @@ from core import (  # noqa: E402
 )
 
 TASK = "pi-16d3ff7c3f14"
-
-
-class TestKrokPlural(unittest.TestCase):
-    def test_polish_plurals(self):
-        cases = {
-            0: "kroków", 1: "krok", 2: "kroki", 4: "kroki",
-            5: "kroków", 10: "kroków", 11: "kroków", 12: "kroków",
-            13: "kroków", 14: "kroków", 21: "krok", 22: "kroki",
-            55: "kroków", 121: "krok", 122: "kroki", 112: "kroków",
-        }
-        for count, word in cases.items():
-            self.assertEqual(_krok_word(count), word, f"count={count}")
 
 
 class TestProgressFormatting(unittest.TestCase):
@@ -52,22 +39,25 @@ class TestProgressFormatting(unittest.TestCase):
         })
         self.assertEqual(
             msg,
-            "Pi pracuje nad zadaniem `pi-16d3ff7c3f14` — wykonano 55 "
-            "kroków. Ostatnia aktywność: bash. Task nadal działa.",
+            "Pi pracuje nad zadaniem `pi-16d3ff7c3f14`. Aktywne narzędzie: bash.",
         )
 
     def test_activity_clause_omitted_when_unavailable(self):
         msg = format_progress_message(TASK, {"message_count": 3})
         self.assertEqual(
             msg,
-            "Pi pracuje nad zadaniem `pi-16d3ff7c3f14` — wykonano 3 kroki. "
-            "Task nadal działa.",
+            "Pi pracuje nad zadaniem `pi-16d3ff7c3f14`.",
         )
-        self.assertNotIn("Ostatnia aktywność", msg)
+        self.assertNotIn("Aktywne narzędzie", msg)
 
-    def test_zero_count_and_singular(self):
-        msg = format_progress_message(TASK, {"message_count": 1})
-        self.assertIn("wykonano 1 krok.", msg)
+    def test_messages_never_imply_completed_steps(self):
+        for count in (None, 0, 1, 4, 42):
+            with self.subTest(message_count=count):
+                row = {"message_count": count, "verification_state": VERIFY_NOT_RUN}
+                progress = format_progress_message(TASK, row)
+                completion = format_notification_message("settled", TASK, row)
+                self.assertNotIn("krok", progress + completion)
+                self.assertNotIn("wykonano", (progress + completion).lower())
 
     def test_no_raw_orchestrator_meta(self):
         msg = format_progress_message(TASK, {
@@ -102,7 +92,7 @@ class TestCompletionFormatting(unittest.TestCase):
                                           self._row(verification_state=VERIFY_PASS))
         self.assertTrue(msg.startswith(
             f"Pi zakończył zadanie `{TASK}`. Weryfikacja: PASS."))
-        self.assertIn("Wykonano 42 kroki.", msg)
+        self.assertNotIn("Wykonano", msg)
         self.assertIn("Czas: 150 s.", msg)
 
     def test_fail_verdict_requires_review(self):
