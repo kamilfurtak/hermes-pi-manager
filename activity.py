@@ -49,9 +49,17 @@ class Projection:
     """Pi 0.85 RPC: text deltas append; partial tool results are cumulative."""
     def __init__(self, task_id):
         self.data = {"schema": 1, "task_id": task_id, "seq": 0, "updated_at": None,
-                     "text": "", "tool": None, "entries": [], "tools_completed": 0}
+                     "text": "", "text_id": None, "tool": None, "entries": [], "tools_completed": 0}
         self.blocks = {}
         self.completed = set()
+        self.tool_names = OrderedDict()
+        self.message_open = False
+
+    def _begin_message(self):
+        self.blocks = {}
+        self.data["text"] = ""
+        self.data["text_id"] = f"message-{self.data['seq'] + 1}"
+        self.message_open = True
 
     def _remember(self, entry):
         if entry.get("text") or entry.get("kind") == "tool":
@@ -61,13 +69,14 @@ class Projection:
     def apply(self, event, now):
         kind = event.get("type")
         if kind == "message_start" and event.get("message", {}).get("role") == "assistant":
-            self.blocks = {}
-            self.data["text"] = ""
+            self._begin_message()
         elif kind == "message_update":
             update = event.get("assistantMessageEvent") or {}
             index = str(update.get("contentIndex", 0))[:12]
             if update.get("type") not in ("text_start", "text_delta", "text_end"):
                 return False  # Thinking and tool arguments are not the display stream.
+            if not self.message_open:
+                self._begin_message()
             if len(self.blocks) >= 16 and index not in self.blocks:
                 return False
             if update["type"] == "text_start":
@@ -78,27 +87,46 @@ class Projection:
                 self.blocks[index] = clipped(update.get("content"))
             self.data["text"] = clipped("\n".join(self.blocks.values()))
         elif kind == "message_end" and event.get("message", {}).get("role") == "assistant":
+            if not self.message_open:
+                self._begin_message()
             self.data["text"] = text_content(event["message"])
-            self._remember({"kind": "assistant", "text": self.data["text"]})
+            self._remember({"kind": "assistant", "id": self.data["text_id"], "text": self.data["text"]})
+            self.message_open = False
         elif kind == "tool_execution_start":
-            self.data["tool"] = {"id": clipped(event.get("toolCallId"), 128),
-                                 "name": clipped(event.get("toolName"), 80), "text": ""}
+            tool_id = clipped(event.get("toolCallId"), 128)
+            if not tool_id or tool_id in self.completed:
+                return False
+            name = clipped(event.get("toolName"), 80)
+            self.tool_names[tool_id] = name
+            if len(self.tool_names) > 256:
+                self.tool_names.popitem(last=False)
+            self.data["tool"] = {"id": tool_id, "name": name, "text": ""}
         elif kind in ("tool_execution_update", "tool_execution_end"):
             tool_id = clipped(event.get("toolCallId"), 128)
             tool = self.data["tool"]
-            if tool is None or tool["id"] != tool_id:
-                return False  # A late event must not replace a newer active tool.
+            current = tool is not None and tool["id"] == tool_id
+            if tool_id not in self.tool_names or tool_id in self.completed:
+                return False
+            if kind.endswith("update") and not current:
+                return False  # Only the foreground tool's cumulative output is streamed.
             result = event.get("partialResult" if kind.endswith("update") else "result", {})
-            tool["text"] = text_content(result)  # Replace; Pi sends cumulative output.
+            text = text_content(result)  # Replace; Pi sends cumulative output.
+            if current:
+                tool["text"] = text
             if kind.endswith("end"):
-                if tool_id not in self.completed:
-                    self.data["tools_completed"] += 1
-                    self.completed.add(tool_id)
-                    # Only recent IDs are needed to suppress retransmission.
-                    if len(self.completed) > 256:
-                        self.completed = {tool_id}
-                    self._remember({**tool, "kind": "tool", "error": bool(event.get("isError"))})
-                self.data["tool"] = None
+                # Pi can read several files in parallel. Every known completion
+                # counts, but an older tool must not erase a newer live output.
+                name = self.tool_names.pop(tool_id)
+                self.data["tools_completed"] += 1
+                self.completed.add(tool_id)
+                if len(self.completed) > 256:
+                    self.completed = {tool_id}
+                self._remember({"id": tool_id, "name": name, "text": text,
+                                "kind": "tool", "error": bool(event.get("isError"))})
+                if current:
+                    pending = next(reversed(self.tool_names), None)
+                    self.data["tool"] = ({"id": pending, "name": self.tool_names[pending], "text": ""}
+                                         if pending else None)
         elif kind not in ("agent_start", "agent_end", "agent_settled"):
             return False
         self.data["seq"] += 1

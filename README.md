@@ -60,16 +60,22 @@ inside the assistant's start acknowledgement. `pi_task` supplies that directive
 for native Desktop/TUI origins. A Desktop with the frontend installed renders
 it; other clients retain their existing notices and terminal continuation.
 
-Expand **Pokaż przebieg** to see Pi's visible text and tool output. Updates arrive
-about once a second, including while the parent conversation is idle. This is a
-bounded recent view, not a complete transcript: long output is shortened and
+Expand **Pokaż przebieg** to read Pi's formatted messages. Completed tool results
+fold separately; the current tool output and errors open automatically. The final
+message appears once, using its longer text buffer instead of the clipped history
+copy. Desktop supplies the Markdown renderer, with a plain-text fallback on older
+SDKs. Updates arrive about once a second, including while the parent conversation
+is idle. This is a bounded recent view, not a complete transcript: long output is shortened and
 private thinking is excluded. The counter counts completed tool calls, not
-messages or an estimated percentage. Execution and verification stay separate.
+messages or an estimated percentage, including overlapping calls. Only the
+foreground tool streams partial output; other tools enter history when completed.
+Execution and verification stay separate.
 
 Install the Python plugin on the backend as usual and reload that backend after
 updating it. On the computer running Desktop, copy `desktop/plugin.js` into
 `~/.hermes/desktop-plugins/pi-manager/plugin.js`, then use **Settings → Plugins**
-or **⌘K → Reload desktop plugins**. No frontend build or npm install is needed.
+or **⌘K → Reload desktop plugins**. This reload replaces frontend contributions
+without restarting the backend. No frontend build or npm install is needed.
 If both halves run on one computer, the existing unified plugin directory is
 also discovered; enable its Desktop half in Settings.
 

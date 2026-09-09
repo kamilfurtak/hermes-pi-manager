@@ -1,6 +1,13 @@
 {
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test plugin.test.mjs" },
-  "devDependencies": { "react": "19.2.7", "react-dom": "19.2.7", "jsdom": "29.1.1" }
+  "scripts": {
+    "test": "node --test plugin.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "streamdown": "2.5.0"
+  }
 }

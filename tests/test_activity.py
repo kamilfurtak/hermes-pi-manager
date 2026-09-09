@@ -55,6 +55,52 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(p.data["tool"]["id"], "new")
         self.assertNotIn("secret", json.dumps(p.data))
 
+    def test_parallel_reads_all_count_without_erasing_live_tool_output(self):
+        p = Projection("pi-test")
+        for name, tool_id in [("read", "a"), ("read", "b"), ("read", "c"), ("bash", "d")]:
+            p.apply({"type": "tool_execution_start", "toolCallId": tool_id, "toolName": name}, 1)
+        p.apply({"type": "tool_execution_update", "toolCallId": "d", "partialResult": {
+            "content": "still running"}}, 2)
+        for tool_id in ("c", "a", "b"):
+            event = {"type": "tool_execution_end", "toolCallId": tool_id, "result": {
+                "content": f"file {tool_id}"}}
+            p.apply(event, 3)
+            self.assertFalse(p.apply(event, 4))
+            self.assertEqual(p.data["tool"]["text"], "still running")
+        self.assertEqual(p.data["tools_completed"], 3)
+        self.assertEqual([entry["text"] for entry in p.data["entries"]], ["file c", "file a", "file b"])
+        self.assertTrue(all(entry["name"] == "read" for entry in p.data["entries"]))
+        p.apply({"type": "tool_execution_end", "toolCallId": "d", "result": {"content": "done"}}, 5)
+        self.assertEqual(p.data["tools_completed"], 4)
+        self.assertIsNone(p.data["tool"])
+
+    def test_shorter_parallel_tool_finishes_without_hiding_remaining_work(self):
+        p = Projection("pi-test")
+        for tool_id in ("long", "short"):
+            p.apply({"type": "tool_execution_start", "toolCallId": tool_id, "toolName": "bash"}, 1)
+        p.apply({"type": "tool_execution_end", "toolCallId": "short", "result": {"content": "done"}}, 2)
+        self.assertEqual(p.data["tool"]["id"], "long")
+        p.apply({"type": "tool_execution_update", "toolCallId": "long", "partialResult": {
+            "content": "one\ntwo"}}, 3)
+        self.assertEqual(p.data["tool"]["text"], "one\ntwo")
+        p.apply({"type": "tool_execution_end", "toolCallId": "long", "result": {"content": "done"}}, 4)
+        self.assertEqual(p.data["tools_completed"], 2)
+        self.assertIsNone(p.data["tool"])
+
+    def test_message_identity_survives_clipping_but_repeated_messages_are_distinct(self):
+        p = Projection("pi-test")
+        end = {"type": "message_end", "message": {"role": "assistant", "content": "x" * 2000}}
+        p.apply(end, 1)
+        first = p.data["text_id"]
+        self.assertEqual(p.data["entries"][0]["id"], first)
+        self.assertNotEqual(p.data["entries"][0]["text"], p.data["text"])
+        p.apply({"type": "message_start", "message": {"role": "assistant"}}, 2)
+        second = p.data["text_id"]
+        p.apply(end, 3)
+        self.assertNotEqual(first, second)
+        self.assertEqual([entry["id"] for entry in p.data["entries"]], [first, second])
+        self.assertEqual(p.data["text_id"], second)
+
 
 class SnapshotTests(unittest.TestCase):
     def test_background_write_is_bounded_private_and_redacted(self):
