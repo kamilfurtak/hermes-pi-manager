@@ -53,6 +53,7 @@ try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .rpc_transport import find_pi_binary  # type: ignore
     from .wake_worker import TerminalWakeWorker  # type: ignore
     from .activity import ActivityRecorder
+    from . import cli_host
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from core import (
         PiManager, Thresholds, VerifierSpec, EXEC_SETTLED, HOST_RUNTIME_ID,
@@ -62,6 +63,7 @@ except ImportError:  # pragma: no cover - standalone/test import (no package)
     from rpc_transport import find_pi_binary
     from wake_worker import TerminalWakeWorker
     from activity import ActivityRecorder
+    import cli_host
 
 logger = logging.getLogger(__name__)
 
@@ -151,13 +153,12 @@ def _capture_routing() -> Dict[str, Any]:
     gateway.session_context API.
 
     Best effort: empty values are omitted, and a CLI process legitimately
-    yields almost nothing from the session context (its notifications then
-    fail permanently with a readable reason instead of being dropped
-    silently). Only serializable strings are stored — never a context or
-    session object.
+    yields almost nothing from the session context. The CLI adapter captures
+    its actual session identity separately for passive terminal notices. Only
+    serializable strings are stored — never a context or session object.
 
-    ``host_runtime_id`` is always stamped, and is the ONLY field an
-    interactive CLI reliably contributes: measured on this Hermes build,
+    ``host_runtime_id`` is always stamped, even when session context is empty:
+    measured on this Hermes build,
     a plain ``hermes`` run leaves HERMES_SESSION_KEY, HERMES_SESSION_SOURCE
     and HERMES_UI_SESSION_ID all unset (HERMES_SESSION_SOURCE is exported
     only by an explicit ``--source`` flag), so ``source`` is recorded for
@@ -203,6 +204,7 @@ def _capture_routing() -> Dict[str, Any]:
             out["hermes_home"] = str(get_hermes_home())
         except ImportError:
             pass
+    out.update(cli_host.capture(out))
     out["host_runtime_id"] = HOST_RUNTIME_ID
     return out
 
@@ -675,6 +677,7 @@ def _stop_all_workers() -> None:
 
 
 def register_all(ctx) -> None:
+    cli_host.bind(ctx, HOST_RUNTIME_ID)
     for name, schema, handler in _TOOLS:
         ctx.register_tool(
             name=name,

@@ -6,7 +6,7 @@ ordinary Desktop session. Progress never starts an orchestrator turn.
 
 core.py owns task semantics; registry_db.py owns durable state; rpc_transport.py
 owns Pi; outbox.py and wake_worker.py own delivery. Native-host compatibility is
-isolated in host_adapter.py and desktop_host.py; Hermes core stays unchanged.
+isolated in host_adapter.py, desktop_host.py and cli_host.py; Hermes core stays unchanged.
 """
 
 from __future__ import annotations

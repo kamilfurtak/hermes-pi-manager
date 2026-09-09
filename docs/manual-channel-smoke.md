@@ -13,9 +13,10 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
 - Telegram: statusy w bieżącym czacie/temacie.
 - Desktop/TUI: natywne powiadomienia; w Desktop jeden toast na zadanie,
   zastępowany następnym i widoczny przez 20 sekund. To nie powiadomienie macOS.
-- Klasyczny interaktywny CLI: testuj automatyczne wznowienie. Obecny plugin
-  nie ma pasywnego celu powiadomień dla sesji bez platform/chat. Brak statusów
-  w tym wariancie jest istniejącym ograniczeniem, nie obietnicą tego promptu.
+- Klasyczny interaktywny CLI: statusy nad polem wpisywania oraz automatyczne
+  wznowienie po zakończeniu. Otwórz CLI z aktualną wtyczką przed zleceniem
+  nowego zadania. Statusy nie uruchamiają modelu i zachowują wpisywany tekst;
+  są doręczane tylko w procesie i rozmowie, które uruchomiły zadanie.
 
 ## Prompt do wklejenia
 

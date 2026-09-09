@@ -153,8 +153,16 @@ There is deliberately no blocking wait tool.
 | Host | Passive progress | Terminal continuation |
 |---|---|---|
 | Telegram/gateway | Existing native messaging adapter | Existing `inject_message(session_key=...)` |
-| Classic interactive CLI | No passive progress destination when no platform/chat is present | Owning CLI's pending-input/interrupt rail |
+| Classic interactive CLI | Text above the prompt in the owning CLI session | Owning CLI's pending-input/interrupt rail |
 | Ordinary Desktop/TUI | `notification.show` to the session's native transport | Native prompt admission in that same backend |
+
+CLI notices use the existing command-safe renderer on the prompt_toolkit loop,
+without model input. They require the original process and session (or its
+compression tip), and wait while the parent is running. `/new`, a closed CLI or
+a foreign process cannot receive them; unavailable notices remain pending.
+The CLI adapter captures identity when a new task is dispatched: reopen the
+CLI to load an updated plugin before testing. No Desktop frontend reload is
+needed for a CLI-only change.
 
 Desktop waits until the current turn, queued human prompts and scheduled native
 continuation are clear. An absent owner does not spend the retry budget or block
@@ -196,8 +204,8 @@ cd tests && for f in test_*.py; do python3 -m unittest "${f%.py}" -q; done
 For a manual channel check, see [the notification and continuation smoke prompt](docs/manual-channel-smoke.md).
 The first progress notice is eligible after 90 seconds, later ones at least
 180 seconds apart, and each requires observed progress. A brief task normally
-produces only its terminal notice. Classic CLI continuation does not imply
-passive progress delivery; Desktop/TUI and messaging have distinct adapters.
+produces only its terminal notice. CLI, Desktop/TUI and messaging have distinct
+passive adapters; terminal continuation remains a separate path.
 
 ## License
 

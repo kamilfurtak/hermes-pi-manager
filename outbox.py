@@ -6,6 +6,7 @@ A task's routing
 origin is captured at dispatch time, persisted with the task in the registry,
 and every notification — progress and terminal — is a durable row in the
 ``notifications`` table. Desktop notices use desktop_host and the native notification.show renderer.
+CLI notices use cli_host and the owning terminal renderer.
 Messaging notices use the
 plugin-local host adapter (``host_adapter.deliver_send_message``) directly,
 and that adapter imports and directly calls the Hermes-native
@@ -46,11 +47,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry, bound  # type: ignore
-    from . import host_adapter, desktop_host  # type: ignore
+    from . import host_adapter, desktop_host, cli_host  # type: ignore
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from registry_db import Registry, bound  # type: ignore
     import host_adapter  # type: ignore
     import desktop_host
+    import cli_host
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +252,10 @@ class NotificationOutbox:
                 platform = "tui"
                 chat_id = origin.get("ui_session_id")
                 target = "tui:" + str(origin.get("session_key") or origin.get("session_id") or "")
+            elif cli_host.is_cli(origin):
+                platform = "cli"
+                chat_id = origin["cli_session_id"]
+                target = "cli:" + chat_id
             message = bound(str(message or ""), MAX_MESSAGE_CHARS)
             if kind == PROGRESS_KIND:
                 nid = progress_notification_id(task_id, self.registry.progress_seq(task_id) + 1)
@@ -332,12 +338,12 @@ class NotificationOutbox:
 class OutboxWorker:
     """Drains the outbox through the plugin-local host adapter.
 
-    The ONLY side effect of delivery is one call of
+    Messaging delivery makes one call of
     ``host_adapter.deliver_send_message({"action": "send", "target": ...,
     "message": ...})`` — which imports and directly calls the Hermes-native
     ``tools.send_message_tool.send_message_tool``. No LLM/agent turn is
-    involved anywhere on this path, no PluginContext is involved (the
-    worker never dispatches through the ToolRegistry), no other tool is
+    involved anywhere on this path (Desktop/CLI use their own passive renderers); the
+    worker never dispatches through the ToolRegistry, no other tool is
     ever dispatched, and ``send_message`` is never registered in the
     ToolRegistry. An explicit ``deliver`` callable may be injected (tests);
     the default is the real host adapter, resolved at construction so a
@@ -416,15 +422,19 @@ class OutboxWorker:
             "source": "tui", "session_key": row.get("session_key"),
             "ui_session_id": row.get("chat_id")}
 
+    def _can_claim(self, row: Dict[str, Any]) -> bool:
+        if row.get("platform") == "cli":
+            task = self.outbox.registry.get_task(row["task_id"]) or {}
+            return cli_host.available(parse_origin(task.get("origin")))
+        return row.get("platform") != "tui" or desktop_host.available(self._desktop_origin(row))
+
     def run_once(self, now: Optional[float] = None) -> int:
         """One drain pass: requeue expired leases, claim due rows, deliver
         each. Public so tests can drive it deterministically. Returns the
         number of rows claimed."""
         now = now if now is not None else self._now_fn()
         rows = self.outbox.claim(self.worker_id, self.lease_seconds,
-                                 self.max_per_tick, now=now, can_claim=lambda row:
-                                 row.get("platform") != "tui" or
-                                 desktop_host.available(self._desktop_origin(row)))
+                                 self.max_per_tick, now=now, can_claim=self._can_claim)
         for row in rows:
             self._deliver_one(row, now)
         return len(rows)
@@ -447,6 +457,10 @@ class OutboxWorker:
                 result = desktop_host.emit_status(
                     self._desktop_origin(row), row.get("message") or "", nid,
                     task_id=row["task_id"])
+            elif row.get("platform") == "cli":
+                task = self.outbox.registry.get_task(row["task_id"]) or {}
+                result = cli_host.emit_status(
+                    parse_origin(task.get("origin")), row.get("message") or "", nid)
             else:
                 result = self._deliver(
                     {"action": "send", "target": target,
