@@ -1,0 +1,8 @@
+{
+  "name": "pi-manager",
+  "label": "Pi Manager",
+  "version": "0.3.0",
+  "description": "Read-only Pi activity for Hermes Desktop",
+  "api": "plugin_api.py",
+  "tab": { "hidden": true }
+}

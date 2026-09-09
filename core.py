@@ -592,6 +592,7 @@ class PiManager:
         notifier: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         progress_notifier: Optional[Callable[[str, Dict[str, Any]], None]] = None,
         outbox: Optional[NotificationOutbox] = None,
+        activity_recorder: Any = None,
     ) -> None:
         # Optional completion callback. The manager stays free of any Hermes
         # import: tools.py supplies something that can reach the conversation,
@@ -599,6 +600,7 @@ class PiManager:
         # never affect a task, so every call is wrapped and best-effort.
         self._notifier = notifier
         self._progress_notifier = progress_notifier
+        self._activity_recorder = activity_recorder
         # The durable, plugin-owned notification outbox (see outbox.py).
         # When set, progress and terminal notices are enqueued as rows; the
         # delivery worker in tools.py drains them by calling the
@@ -952,6 +954,11 @@ class PiManager:
         if row is None:
             return
         etype = event.get("type") or event.get("event") or "unknown"
+        if source == "rpc" and self._activity_recorder is not None:
+            try:
+                self._activity_recorder.observe(task_id, event)
+            except Exception:
+                logger.warning("Pi live view rejected an event; task continues", exc_info=True)
         now = self._now()
         before = row["execution_state"]
         updates: Dict[str, Any] = {
@@ -2288,6 +2295,11 @@ class PiManager:
         Idempotent and safe to call more than once.
         """
         self._shutdown_flag.set()
+        if self._activity_recorder is not None:
+            try:
+                self._activity_recorder.close()
+            except Exception:
+                logger.warning("Pi live view shutdown failed", exc_info=True)
         with self._runtimes_lock:
             runtimes = list(self._runtimes.values())
         for rt in runtimes:

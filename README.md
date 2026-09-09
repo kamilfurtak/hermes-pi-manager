@@ -53,6 +53,44 @@ never automatically retried. A live dispatcher is preserved when another Hermes
 process scans the shared registry. Acceptance is distinct from finishing the
 turn; Desktop records the latter as a `wake_turn_finished` event.
 
+## Live activity in Desktop
+
+The optional Desktop half renders `::pi-live{task="pi-…"}` as an updating card
+inside the assistant's start acknowledgement. `pi_task` supplies that directive
+for native Desktop/TUI origins. A Desktop with the frontend installed renders
+it; other clients retain their existing notices and terminal continuation.
+
+Expand **Pokaż przebieg** to see Pi's visible text and tool output. Updates arrive
+about once a second, including while the parent conversation is idle. This is a
+bounded recent view, not a complete transcript: long output is shortened and
+private thinking is excluded. The counter counts completed tool calls, not
+messages or an estimated percentage. Execution and verification stay separate.
+
+Install the Python plugin on the backend as usual and reload that backend after
+updating it. On the computer running Desktop, copy `desktop/plugin.js` into
+`~/.hermes/desktop-plugins/pi-manager/plugin.js`, then use **Settings → Plugins**
+or **⌘K → Reload desktop plugins**. No frontend build or npm install is needed.
+If both halves run on one computer, the existing unified plugin directory is
+also discovered; enable its Desktop half in Settings.
+
+For Desktop over SSH, the JS file belongs on the laptop and the Python files
+belong on the remote host. `ctx.rest` uses Desktop's existing authenticated
+connection to native `hermes serve`; no additional listener or external WebUI
+is required. The read-only endpoint rejects tasks from another conversation or
+profile, supports compression continuations, and never initializes a manager.
+The frontend drops in-flight responses when navigation changes its owner.
+
+`state/pi-manager/activity/` contains disposable, redacted, private snapshots.
+One coalescing writer per manager publishes them atomically; event handling
+never performs network or filesystem I/O for the view. Snapshots expire after
+seven days and are capped at 256 files; each is at most 128 KiB. A presentation
+failure does not change task settlement, verification, notices or wake policy.
+Older tasks without snapshots still display their registry status.
+
+Validation: `python -m unittest discover -s tests`; for the React view,
+`cd desktop && npm ci && npm test`. The latter dependencies are only for tests;
+Desktop supplies React and the SDK at runtime.
+
 ## Requirements
 
 - Hermes Agent **v0.21.0+** — earlier hosts have no `session_key` on

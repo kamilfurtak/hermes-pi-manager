@@ -52,6 +52,7 @@ try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry, default_db_path  # type: ignore
     from .rpc_transport import find_pi_binary  # type: ignore
     from .wake_worker import TerminalWakeWorker  # type: ignore
+    from .activity import ActivityRecorder
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from core import (
         PiManager, Thresholds, VerifierSpec, EXEC_SETTLED, HOST_RUNTIME_ID,
@@ -60,6 +61,7 @@ except ImportError:  # pragma: no cover - standalone/test import (no package)
     from registry_db import Registry, default_db_path
     from rpc_transport import find_pi_binary
     from wake_worker import TerminalWakeWorker
+    from activity import ActivityRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +216,16 @@ def get_manager() -> PiManager:
         if _manager is None:
             registry = Registry(db_path=default_db_path())
             outbox = NotificationOutbox(registry)
-            _manager = PiManager(registry=registry, outbox=outbox)
+            # Presentation snapshots are shared with the separate serve process.
+            # Redact completed buffers, so credentials split across RPC deltas
+            # are processed together; no private thinking is projected.
+            try:
+                from agent.redact import redact_sensitive_text
+                redact = lambda text: redact_sensitive_text(text, force=True, redact_url_credentials=True)
+            except ImportError:  # Standalone tests/CLI still retain task management.
+                redact = lambda text: "[Text preview requires the Hermes redactor]" if text else ""
+            recorder = ActivityRecorder(registry.path.parent / "activity", redact=redact)
+            _manager = PiManager(registry=registry, outbox=outbox, activity_recorder=recorder)
             try:
                 _manager.recover_all()
             except Exception:
@@ -381,6 +392,20 @@ def handle_pi_task(args: Dict[str, Any], **_kw) -> str:
         prompt=str(prompt), cwd=str(cwd_path), task_id=args.get("task_id"),
         thresholds=thresholds, verifier=verifier, origin=origin or None,
     )
+    if (result.get("task_id") and (origin.get("ui_session_id")
+            or origin.get("source") in ("desktop", "tui"))):
+        task_id = str(result["task_id"])
+        # Directive attributes are untrusted. Custom task IDs outside this
+        # deliberately narrow alphabet still work, just without an inline card.
+        import re
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,160}", task_id):
+            result["desktop_live_view"] = {
+                "directive": '::pi-live{task="' + task_id + '"}',
+                "instruction": "For Hermes Desktop, include this directive as its own paragraph "
+                               "in your start acknowledgement, without a code fence. Then end "
+                               "your turn. The card refreshes on its own; do not poll pi_status "
+                               "or generate progress turns. Terminal continuation is unchanged.",
+            }
     return _result(result)
 
 

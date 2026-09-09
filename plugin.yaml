@@ -1,5 +1,5 @@
 name: pi-manager
-version: "0.2.0"
+version: "0.3.0"
 description: "Durable Pi RPC tasks with stall recovery, separate verification, passive progress notices and one terminal continuation to the originating CLI, gateway or Desktop session. No blocking wait. Desktop uses its existing notice renderer and native prompt admission; no core patch."
 kind: standalone
 
