@@ -187,8 +187,24 @@ CLI process to load an updated plugin before testing. Reconnecting Herdr to the
 same surviving process does not reload Python. Desktop frontend changes require
 copying/reloading its JS half as described above.
 
-All three views use the same bounded, redacted activity projection. Native
-Telegram provides message delivery rather than a terminal-style live inspector;
+All three views use the same bounded, redacted projection for compact status.
+The CLI inspector additionally tails an append-only event log: timestamps,
+executed tool arguments, visible assistant text, incremental tool output,
+per-tool durations and errors. Cumulative RPC tool updates are reconciled by
+call ID, so parallel tools and repeated snapshots do not duplicate output.
+Completed lines appear while a tool runs; an unfinished line is held until its
+newline or the end of the message/result, then redacted before publication.
+Private thinking and speculative tool arguments never enter this log.
+
+The native viewer follows the newest **32 KiB** and supports its normal scrolling;
+it no longer receives a replacement of the last eight compact entries. The
+private `state/pi-manager/cli-transcripts/<task-hash>.log` preserves more history,
+rotating at 2 MiB into one `.log.1` previous part. Both are 0600, retained for
+seven days/up to 256 task pairs. Oversize lines or a saturated display queue
+produce explicit omission markers; display I/O cannot change task outcomes.
+Existing tasks without this log retain their previous snapshot-based preview.
+
+Native Telegram provides message delivery rather than a terminal-style live inspector;
 the plugin does not impersonate a built-in subagent to manufacture one.
 Passive notices remain rate-limited, and execution/verification remain separate.
 Tool errors appear in live output; a failed command that Pi handles is not
@@ -232,8 +248,10 @@ surface, because the public API exposes no equivalent:
 - `cli_monitor.py` → instance-local adapters for native `SubagentMonitor.refresh`
   and `control`. The native UI/keybindings are reused; methods are restored on
   teardown. No native delegation registry entries or Hermes files are changed.
-  Readable tails are private, redacted projections (at most 256 files/7 days),
-  not raw Pi session transcripts.
+  Readable tails are private, redacted projections, not raw Pi session transcripts.
+- `live_transcript.py` → a plugin-owned display log assembled from RPC events.
+  It reuses the activity writer, preserves tool identity and incremental output,
+  and keeps up to 256 task log pairs for seven days. It never controls execution.
 
 Hermes upgrades require rechecking these boundaries. Missing Desktop capability
 or session ownership leaves rows pending; uncertain admission requires diagnosis.

@@ -12,8 +12,10 @@ from pathlib import Path
 
 try:
     from .activity import snapshot_path, load_snapshot, activity_summary
+    from .live_transcript import transcript_path
 except ImportError:
     from activity import snapshot_path, load_snapshot, activity_summary
+    from live_transcript import transcript_path
 
 FINAL = {"SETTLED", "CRASHED", "ABORTED"}
 
@@ -77,6 +79,7 @@ class Monitor:
         self.closed = False
         self._lock = threading.RLock()
         self._cache = {}
+        self._statuses = {}
         self._actions = {}
         self._action_times = {}
         self._pruned_at = 0
@@ -103,7 +106,7 @@ class Monitor:
             with self.registry._lock:
                 candidates = self.registry._conn.execute(
                     'SELECT task_id,origin,execution_state,verification_state,started_at,settled_at,'
-                    'active_tool,last_progress_at,last_event_at,wake_state '
+                    'active_tool,last_progress_at,last_event_at,wake_state,last_error '
                     'FROM tasks ORDER BY created_at DESC LIMIT 256').fetchall()
             rows = {}
             for task_id, delivered_at in list(self._action_times.items()):
@@ -131,12 +134,23 @@ class Monitor:
                     entry['tail'] = self._actions[row['task_id']] + '\n\n' + entry['tail']
                 entry['goal'] = 'Pi · ' + entry['activity']
                 entry['last_tool'] = entry['details']
-                entry['live_transcript'] = str(self._write_preview(entry))
+                path = transcript_path(self.registry.path.parent / 'cli-transcripts', row['task_id'])
+                if path.is_file():
+                    # The native viewer now tails the growing event log directly.
+                    # The compact snapshot remains the dock/Desktop projection.
+                    stamp = path.stat()
+                    entry['transcript_version'] = (stamp.st_mtime_ns, stamp.st_size)
+                    self._record_status(entry)
+                else:
+                    # Tasks started by an older plugin still have a useful view.
+                    path = self._write_preview(entry)
+                entry['live_transcript'] = str(path)
                 rows[row['task_id']] = entry
                 if len(rows) >= 16:
                     break
             self.rows = rows
             self._cache = {key: value for key, value in self._cache.items() if key in rows}
+            self._statuses = {key: value for key, value in self._statuses.items() if key in rows}
             self._actions = {key: value for key, value in self._actions.items() if key in rows}
             self.native.entries = native_rows + list(rows.values())
             ids = [entry['subagent_id'] for entry in self.native.entries]
@@ -144,11 +158,24 @@ class Monitor:
             # Keep the host's idle repaint policy once the last task is gone.
             return native_changed or rows != previous
 
+    def _record_status(self, row):
+        task_id = row['task_id']
+        status = (row['status'], row.get('last_error'), self._actions.get(task_id))
+        if self._statuses.get(task_id) == status:
+            return
+        recorder = getattr(self.manager, '_activity_recorder', None)
+        if recorder is not None:
+            try:
+                recorder.note(task_id, ' · '.join(str(part) for part in status if part))
+            except Exception:
+                return  # Display integration must never break the native monitor.
+        self._statuses[task_id] = status
+
     def _write_preview(self, row):
         import os
         import tempfile
-        # The native viewer reads a bounded text tail. Derive it from the same
-        # redacted snapshots as Desktop; never hand it the raw Pi transcript.
+        # Compatibility fallback for tasks without a recorded CLI transcript.
+        # Never hand the host a raw Pi session (which includes private thinking).
         directory = self.registry.path.parent / 'cli-view'
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         now = time.time()
@@ -233,4 +260,5 @@ class Monitor:
             self.original_refresh()
             self.rows = {}
             self._cache.clear()
+            self._statuses.clear()
             self.cli._app.invalidate()

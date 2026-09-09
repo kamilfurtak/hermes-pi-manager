@@ -21,6 +21,11 @@ postępu; pojedynczy długi sleep nie daje takiego dowodu.
   uruchamiają modelu ani nie powtarzają się w historii. Starszy Hermes bez
   natywnego panelu nadal otrzymuje statusy tekstowe nad polem wpisywania.
   Otwórz nowy proces CLI po aktualizacji wtyczki, zanim zlecisz zadanie.
+  W rozwiniętym podglądzie sprawdź godzinę i komendę przy starcie narzędzia,
+  nowe linie wyniku przed zakończeniem komendy oraz czas i wynik po zakończeniu.
+  Dziennik ma rosnąć; powtarzane częściowe wyniki RPC nie mogą dublować linii.
+  Testuj komendą wypisującą tekst co kilka sekund, np. pętlą `printf` i `sleep`.
+  Samo `sleep`, które wypisuje wynik dopiero na końcu, nie testuje strumieniowania.
 
 ## Prompt do wklejenia
 

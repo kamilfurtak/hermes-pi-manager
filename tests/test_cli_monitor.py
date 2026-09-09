@@ -7,8 +7,9 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from test_pi_manager import PiManagerTestCase, wait_until
-from activity import snapshot_path
+from activity import ActivityRecorder, snapshot_path
 from cli_monitor import Monitor
+from live_transcript import transcript_path
 
 
 class TestNativeCLIMonitor(PiManagerTestCase):
@@ -111,3 +112,56 @@ class TestNativeCLIMonitor(PiManagerTestCase):
         self.registry.update_task('pi-one', origin='{"session_id":"other"}')
         self.assertIn('error', self.native.control('stop', target='pi-one'))
         self.manager.abort_task.assert_not_called()
+
+    def test_native_tail_reads_append_log_with_history_beyond_compact_snapshot(self):
+        self.task()
+        recorder = ActivityRecorder(self.registry.path.parent / 'activity', interval=3600)
+        self.addCleanup(recorder.close)
+        self.manager._activity_recorder = recorder
+        for i in range(12):
+            recorder.observe('pi-one', {'type': 'tool_execution_start', 'toolCallId': str(i),
+                                      'toolName': 'bash', 'args': {'command': f'printf STEP-{i}'}})
+            recorder.observe('pi-one', {'type': 'tool_execution_end', 'toolCallId': str(i),
+                                      'result': {'content': f'STEP-{i}\n'}})
+        recorder.flush()
+        with patch.object(self.monitor, '_write_preview', side_effect=AssertionError('snapshot tail used')):
+            self.monitor.attach()
+            self.native.selected_id = 'pi-one'
+            self.native.refresh()
+        path = transcript_path(self.registry.path.parent / 'cli-transcripts', 'pi-one')
+        self.assertEqual(self.native.selected['live_transcript'], str(path))
+        view = self.host.read_tail(str(path))
+        self.assertIn('printf STEP-0', view)
+        self.assertIn('printf STEP-11', view)
+        self.assertNotIn('Ostatnie wpisy;', view)
+        data = json.loads(snapshot_path(recorder.directory, 'pi-one').read_text())
+        self.assertEqual(len(data['entries']), 8, 'Desktop keeps its original bounded projection')
+        recorder.observe('pi-one', {'type': 'tool_execution_start', 'toolCallId': 'live',
+                                  'toolName': 'bash', 'args': {'command': 'long command'}})
+        recorder.observe('pi-one', {'type': 'tool_execution_update', 'toolCallId': 'live',
+                                  'partialResult': {'content': 'OUTPUT BEFORE COMPLETION\n'}})
+        recorder.flush()
+        self.assertTrue(self.native.refresh())
+        self.assertIn('OUTPUT BEFORE COMPLETION', self.host.read_tail(str(path)))
+        self.assertTrue(path.read_text().startswith(view))
+
+    def test_registry_verdict_appends_once_and_redacts_error_details(self):
+        self.task()
+        recorder = ActivityRecorder(self.registry.path.parent / 'activity', interval=3600,
+                                    redact=lambda text: text.replace('secret-token', '[redacted]'))
+        self.addCleanup(recorder.close)
+        self.manager._activity_recorder = recorder
+        recorder.observe('pi-one', {'type': 'agent_start'})
+        recorder.flush()
+        self.monitor.attach()
+        self.registry.update_task('pi-one', execution_state='SETTLED', verification_state='FAIL',
+                                  wake_state='pending', last_error='secret-token')
+        self.monitor.refresh()
+        recorder.flush()
+        self.monitor.refresh()
+        recorder.flush()
+        path = transcript_path(self.registry.path.parent / 'cli-transcripts', 'pi-one')
+        view = self.host.read_tail(str(path))
+        self.assertEqual(view.count('Błąd weryfikacji'), 1)
+        self.assertIn('[redacted]', view)
+        self.assertNotIn('secret-token', view)

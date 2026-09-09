@@ -1,8 +1,8 @@
-"""Bounded, disposable Desktop view of Pi RPC events; never task authority.
+"""Disposable Pi activity views; never task authority.
 
 The RPC reader only updates memory. One coalescing writer publishes private,
-atomic snapshots for the separate ``hermes serve`` process. No model calls,
-notifications, registry writes or execution decisions live here.
+atomic snapshots for ``hermes serve`` and an append-only CLI transcript.
+No model calls, notifications, registry writes or execution decisions live here.
 """
 from __future__ import annotations
 
@@ -154,8 +154,13 @@ class Projection:
 
 class ActivityRecorder:
     def __init__(self, directory, *, interval=0.5, redact=lambda text: text):
+        try:
+            from .live_transcript import TranscriptRecorder
+        except ImportError:
+            from live_transcript import TranscriptRecorder
         self.directory = Path(directory)
         self.interval, self.redact = interval, redact
+        self._transcripts = TranscriptRecorder(self.directory.parent / 'cli-transcripts', redact)
         self._lock = threading.Lock()
         self._tasks = OrderedDict()
         self._dirty = set()
@@ -174,15 +179,28 @@ class ActivityRecorder:
             self._tasks.move_to_end(task_id)
             if self._tasks[task_id].apply(event, time.time()):
                 self._dirty.add(task_id)
+            try:
+                self._transcripts.observe(task_id, event, time.time())
+            except Exception:
+                LOG.warning('Pi live transcript rejected an event', exc_info=True)
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="pi-activity", daemon=True)
                 self._thread.start()
+
+    def note(self, task_id, text):
+        with self._lock:
+            if not self._stop.is_set():
+                self._transcripts.note(task_id, text, time.time())
+                if self._thread is None:
+                    self._thread = threading.Thread(target=self._run, name="pi-activity", daemon=True)
+                    self._thread.start()
 
     def _run(self):
         while not self._stop.wait(self.interval):
             self.flush()
 
     def flush(self):
+        self._transcripts.flush()
         with self._lock:
             pending = [(key, json.loads(json.dumps(self._tasks[key].data))) for key in self._dirty]
             self._dirty.clear()
