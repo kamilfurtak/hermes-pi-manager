@@ -61,11 +61,14 @@ def presentation(row, data, now):
     if tool:
         blocks.append(f"{plain(tool.get('name'))} · w trakcie\n{plain(tool.get('text')) or 'Oczekiwanie na wynik…'}")
     tail = '\n\n'.join(blocks) or 'Oczekiwanie na pierwsze wpisy Pi…'
+    # Aborted/crashed tasks have no settled_at. Match the manager's status
+    # clock while their final transcript remains open in the inspector.
+    ended_at = (row.get('settled_at') or row.get('last_event_at') or now) if state in FINAL else now
     return dict(row, status=status, activity=activity, details=details,
                 tail=f'{status} · {details}\nOstatnie wpisy; długie wyniki są skracane.\n\n{tail}',
                 subagent_id=row['task_id'], pi=True,
                 goal=plain(row.get('prompt') or row['task_id']),
-                elapsed=max(0, int((row.get('settled_at') or now) - (row.get('started_at') or now))))
+                elapsed=max(0, int(ended_at - (row.get('started_at') or now))))
 
 
 class Monitor:

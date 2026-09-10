@@ -100,6 +100,22 @@ class TestNativeCLIMonitor(PiManagerTestCase):
         self.assertEqual(self.monitor.rows['pi-one']['activity'], 'Brak postępu')
         self.assertIn('bez nowych wpisów 60s', self.monitor.rows['pi-one']['details'])
 
+    def test_final_inspector_clock_stops_for_aborted_and_crashed_tasks(self):
+        self.task()
+        self.monitor.attach()
+        self.native.opening = True
+        for state in ('ABORTED', 'CRASHED'):
+            with self.subTest(state=state):
+                self.registry.update_task('pi-one', execution_state=state,
+                                          last_event_at=160, settled_at=None)
+                self.monitor.refresh(now=200)
+                self.assertEqual(self.monitor.rows['pi-one']['elapsed'], 60)
+                self.monitor.refresh(now=3800)
+                self.assertEqual(self.monitor.rows['pi-one']['elapsed'], 60)
+        self.registry.update_task('pi-one', execution_state='SETTLED', settled_at=150)
+        self.monitor.refresh(now=3800)
+        self.assertEqual(self.monitor.rows['pi-one']['elapsed'], 50)
+
     def test_controls_are_scoped_and_report_rpc_errors_without_blocking_native_ui(self):
         self.task()
         self.monitor.attach()
