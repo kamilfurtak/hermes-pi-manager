@@ -21,10 +21,11 @@ process):
     completes successfully with zero LLM turns and zero registry entries
     for send_message.
 
-Run:  python3 tests/test_loader_integration.py
-Requires the hermes-agent source tree (PYTHONPATH) — discovered
-automatically from ~/.hermes/hermes-agent, mirroring the pattern used by
-plugins/auto-router/tests/test_loader_integration.py.
+Run: python3 scripts/run-tests.py --suite host
+Requires Hermes source and its installed Python dependencies. Set
+HERMES_AGENT_SOURCE and HERMES_PYTHON for an explicit host, or use
+~/.hermes/hermes-agent. The host runner fails if prerequisites are missing;
+unit CI deliberately excludes this module. No real platform message is sent.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO = Path(os.path.expanduser("~/.hermes/hermes-agent"))
+REPO = Path(os.environ.get("HERMES_AGENT_SOURCE", "~/.hermes/hermes-agent")).expanduser()
 PLUGIN_DIR = Path(__file__).parent.parent
 
 
@@ -67,8 +68,11 @@ class TestLoaderIntegration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        if not REPO.exists():
-            raise unittest.SkipTest(f"hermes-agent source not found at {REPO}")
+        if not (REPO / "hermes_cli" / "plugins.py").is_file() and not (REPO / "hermes_cli" / "plugins" / "__init__.py").is_file():
+            message = f"hermes-agent source not found at {REPO}"
+            if os.environ.get("PI_REQUIRE_HOST_TESTS") == "1":
+                raise RuntimeError(message)
+            raise unittest.SkipTest(message)
         cls.tmp_home = Path(tempfile.mkdtemp(prefix="hermes-pm-it-"))
         cls.plugins_dst = cls.tmp_home / "plugins" / "pi-manager"
         shutil.copytree(

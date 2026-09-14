@@ -114,8 +114,31 @@ else uses documented APIs only.
 
 ```bash
 hermes plugins doctor . --ci                 # manifest + registration contract
-cd tests && for f in test_*.py; do python3 -m unittest "${f%.py}" -q; done
+python3 scripts/run-tests.py --suite unit   # stdlib tests; no real Hermes host
 ```
+
+### What the green CI badge proves
+
+The Python 3.11/3.12 matrix runs **unit and fixture tests only**, with each
+module in its own process and an isolated temporary `HERMES_HOME`. Zero-test
+or skipped modules fail this gate. Fake Pi processes and stubbed host APIs do
+not establish live Pi execution, production delivery or host compatibility.
+
+Real-loader acceptance is explicit and separate:
+
+```bash
+HERMES_AGENT_SOURCE=/path/to/hermes-agent \
+HERMES_PYTHON=/path/to/hermes-agent/venv/bin/python3 \
+/path/to/hermes-agent/venv/bin/python3 scripts/run-tests.py --suite host
+```
+
+Use a checked-out host revision with its dependencies installed and record its
+commit alongside the result. The host gate fails when the source is unavailable
+or tests are skipped. It loads the actual plugin manager and registry in a
+**temporary home**, tests unknown-task dispatch and the outbox-to-host adapter;
+only the leaf platform send is stubbed. It does not send a Telegram message,
+launch real Pi/NInfer or validate the full production gateway. No installed
+Hermes configuration or runtime code is modified by these tests.
 
 ## License
 

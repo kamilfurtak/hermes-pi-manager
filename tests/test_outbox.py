@@ -869,8 +869,15 @@ class TestProgressGating(OutboxTestCase):
         self.clock.advance(3600)
         manager._notify_progress(task_id, rt)  # must be a no-op
         self.assertEqual([k for k in self._kinds(task_id) if k == "progress"], [])
+        # SETTLED is persisted before _on_settled starts the verifier thread.
+        # Event application is not notification completion: wait for the
+        # actual durable outbox row, without assuming a thread schedule.
+        self.assertTrue(wait_until(
+            lambda: "settled" in self._kinds(task_id)),
+            "terminal notification was never enqueued")
         self.assertEqual([k for k in self._kinds(task_id) if k == "settled"],
                          ["settled"])
+        self.assertNotIn("progress", self._kinds(task_id))
 
 
 # ---------------------------------------------------------------------------
