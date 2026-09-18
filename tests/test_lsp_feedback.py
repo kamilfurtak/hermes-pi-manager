@@ -89,7 +89,7 @@ class TestLspFeedbackPump(unittest.TestCase):
         # the retry catches the real finding.
         self.results.append(_Result([], errors=0))
         self.results.append(_Result(["a.ts:1: bad type"]))
-        self._pump(retry_seconds=0.05)
+        self._pump()
         _write_tool_call(self.session)
         self.assertTrue(_wait_until(lambda: bool(self.steers)),
                         "expected a steer after the empty-verdict retry")
@@ -98,7 +98,7 @@ class TestLspFeedbackPump(unittest.TestCase):
     def test_empty_twice_stays_silent(self):
         self.results.append(_Result([], errors=0))
         self.results.append(_Result([], errors=0))
-        self._pump(retry_seconds=0.05)
+        self._pump()
         _write_tool_call(self.session)
         self.assertFalse(_wait_until(lambda: bool(self.steers)),
                          "no findings means no steer, even after retry")

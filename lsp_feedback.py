@@ -40,7 +40,7 @@ DEFAULT_QUIET_SECONDS = 4.0
 DEFAULT_MAX_REPORTS = 4
 DEFAULT_CHECK_BUDGET = 15.0
 DEFAULT_POLL_SECONDS = 1.0
-RETRY_EMPTY_SECONDS = 2.5
+GIVE_UP_EMPTY_SECONDS = 12.0
 MAX_STEER_CHARS = 600
 MAX_FINDINGS_PER_STEER = 5
 
@@ -65,7 +65,7 @@ class LspFeedbackPump:
         max_reports: int = DEFAULT_MAX_REPORTS,
         check_budget: float = DEFAULT_CHECK_BUDGET,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
-        retry_seconds: float = RETRY_EMPTY_SECONDS,
+        empty_give_up_seconds: float = GIVE_UP_EMPTY_SECONDS,
         clock: Any = None,
     ) -> None:
         self._task_id = task_id
@@ -77,12 +77,13 @@ class LspFeedbackPump:
         self._max_reports = max_reports
         self._check_budget = check_budget
         self._poll_seconds = poll_seconds
-        self._retry_seconds = retry_seconds
+        self._empty_give_up_seconds = empty_give_up_seconds
         self._clock = clock or time.monotonic
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._offset = 0
         self._last_write_at: Optional[float] = None
+        self._empty_since: Optional[float] = None
         self._reported: Set[str] = set()
         self._reports = 0
 
@@ -152,6 +153,7 @@ class LspFeedbackPump:
                 continue
             if str(part.get("name") or "") in WRITE_TOOL_NAMES:
                 self._last_write_at = self._clock()
+                self._empty_since = None  # new burst: restart the give-up clock
 
     def _should_check(self) -> bool:
         if self._last_write_at is None:
@@ -162,22 +164,36 @@ class LspFeedbackPump:
 
     def _check_now(self) -> None:
         result = lsp_check.run(self._cwd, budget_seconds=self._check_budget)
-        # Newly created files race tsserver warm-up: the first verdict can
-        # come back clean simply because diagnostics timed out. Retry once
-        # before giving up - still fully host-side, zero agent turns.
-        if result and not result.get("findings"):
-            self._stop.wait(self._retry_seconds)
-            result = lsp_check.run(self._cwd, budget_seconds=self._check_budget)
-        self._last_write_at = None  # only re-check after another write
         if not result:
-            return  # no verdict; stay silent
+            self._last_write_at = None  # no verdict; stay silent
+            self._empty_since = None
+            return
         findings: List[str] = result.get("findings") or []
+        if not findings:
+            # Newly created files race tsserver warm-up: a fresh file can
+            # come back "clean" simply because diagnostics timed out. Keep
+            # the write armed so the next poll retries, until the give-up
+            # deadline passes. Still fully host-side, zero agent turns.
+            now = self._clock()
+            empty_since = self._empty_since
+            if empty_since is None:
+                empty_since = now
+                self._empty_since = empty_since
+            if now - empty_since >= self._empty_give_up_seconds:
+                self._last_write_at = None
+                self._empty_since = None
+            return
+        self._last_write_at = None
+        self._empty_since = None
         fresh = [f for f in findings if f not in self._reported]
         if not fresh:
             return
         self._reported.update(findings)
         self._reports += 1
         text = self._format(fresh, result)
+        logger.info(
+            "pi-manager: lsp feedback steering %d error(s) into task=%s",
+            len(fresh), self._task_id)
         try:
             self._steer(text)
         except Exception:  # noqa: BLE001
