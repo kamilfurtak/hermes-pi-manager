@@ -777,7 +777,7 @@ class PiManager:
             pump.start()
             rt.lsp_feedback = pump
         except Exception:  # noqa: BLE001 - feedback must never break dispatch
-            logger.debug("pi-manager: lsp feedback pump unavailable", exc_info=True)
+            logger.warning("pi-manager: lsp feedback pump unavailable", exc_info=True)
 
         thread = threading.Thread(
             target=self._boot_and_run,

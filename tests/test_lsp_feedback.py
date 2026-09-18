@@ -84,6 +84,26 @@ class TestLspFeedbackPump(unittest.TestCase):
         self.assertIn("a.ts:12: bad name", self.steers[0])
         self.assertEqual(len(self.records), 1)
 
+    def test_empty_verdict_retries_and_steers_on_second_call(self):
+        # tsserver warm-up race: first verdict comes back clean (timed out),
+        # the retry catches the real finding.
+        self.results.append(_Result([], errors=0))
+        self.results.append(_Result(["a.ts:1: bad type"]))
+        self._pump(retry_seconds=0.05)
+        _write_tool_call(self.session)
+        self.assertTrue(_wait_until(lambda: bool(self.steers)),
+                        "expected a steer after the empty-verdict retry")
+        self.assertIn("a.ts:1: bad type", self.steers[0])
+
+    def test_empty_twice_stays_silent(self):
+        self.results.append(_Result([], errors=0))
+        self.results.append(_Result([], errors=0))
+        self._pump(retry_seconds=0.05)
+        _write_tool_call(self.session)
+        self.assertFalse(_wait_until(lambda: bool(self.steers)),
+                         "no findings means no steer, even after retry")
+        self.assertEqual(self.records, [])
+
     def test_same_findings_are_not_steered_twice(self):
         self.results.append(_Result(["a.ts:12: bad name"]))
         self.results.append(_Result(["a.ts:12: bad name"]))
@@ -113,7 +133,11 @@ class TestLspFeedbackPump(unittest.TestCase):
         self._pump(max_reports=2)
         for _ in range(3):
             _write_tool_call(self.session)
-            time.sleep(0.15)
+            # gap > quiet window: each write is its own edit burst
+            time.sleep(0.3)
+        self.assertTrue(_wait_until(lambda: len(self.steers) == 2, timeout=4.0),
+                        "expected the two budgeted steers to fire")
+        time.sleep(0.4)  # give a would-be third check a chance to misbehave
         self.assertEqual(len(self.steers), 2, "budget exceeded")
 
     def test_read_only_tools_do_not_trigger_a_check(self):

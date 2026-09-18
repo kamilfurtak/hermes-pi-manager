@@ -40,6 +40,7 @@ DEFAULT_QUIET_SECONDS = 4.0
 DEFAULT_MAX_REPORTS = 4
 DEFAULT_CHECK_BUDGET = 15.0
 DEFAULT_POLL_SECONDS = 1.0
+RETRY_EMPTY_SECONDS = 2.5
 MAX_STEER_CHARS = 600
 MAX_FINDINGS_PER_STEER = 5
 
@@ -64,6 +65,7 @@ class LspFeedbackPump:
         max_reports: int = DEFAULT_MAX_REPORTS,
         check_budget: float = DEFAULT_CHECK_BUDGET,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
+        retry_seconds: float = RETRY_EMPTY_SECONDS,
         clock: Any = None,
     ) -> None:
         self._task_id = task_id
@@ -75,6 +77,7 @@ class LspFeedbackPump:
         self._max_reports = max_reports
         self._check_budget = check_budget
         self._poll_seconds = poll_seconds
+        self._retry_seconds = retry_seconds
         self._clock = clock or time.monotonic
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -94,6 +97,9 @@ class LspFeedbackPump:
             daemon=True,
         )
         self._thread.start()
+        logger.info(
+            "pi-manager: lsp feedback pump active (task=%s, session=%s)",
+            self._task_id, self._session_file)
 
     def stop(self) -> None:
         self._stop.set()
@@ -156,6 +162,12 @@ class LspFeedbackPump:
 
     def _check_now(self) -> None:
         result = lsp_check.run(self._cwd, budget_seconds=self._check_budget)
+        # Newly created files race tsserver warm-up: the first verdict can
+        # come back clean simply because diagnostics timed out. Retry once
+        # before giving up - still fully host-side, zero agent turns.
+        if result and not result.get("findings"):
+            self._stop.wait(self._retry_seconds)
+            result = lsp_check.run(self._cwd, budget_seconds=self._check_budget)
         self._last_write_at = None  # only re-check after another write
         if not result:
             return  # no verdict; stay silent
