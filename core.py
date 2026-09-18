@@ -82,7 +82,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     from .registry_db import Registry, bound  # type: ignore
-    from . import lsp_check, execution_owner  # type: ignore
+    from . import lsp_check, lsp_feedback, execution_owner  # type: ignore
     from .activity import load_snapshot, activity_summary
     from .outbox import NotificationOutbox, _safe_ref  # type: ignore
     from .rpc_transport import (  # type: ignore
@@ -95,7 +95,7 @@ try:  # pragma: no cover - normal path: loaded as a real package by Hermes
     )
 except ImportError:  # pragma: no cover - standalone/test import (no package)
     from registry_db import Registry, bound
-    import lsp_check, execution_owner  # type: ignore
+    import lsp_check, lsp_feedback, execution_owner  # type: ignore
     from activity import load_snapshot, activity_summary
     from outbox import NotificationOutbox, _safe_ref
     from rpc_transport import (
@@ -552,12 +552,21 @@ class _TaskRuntime:
     pre_unresponsive_state: Optional[str] = None
     watchdog_thread: Optional[threading.Thread] = None
     stop_watchdog: threading.Event = field(default_factory=threading.Event)
+    lsp_feedback: Optional[Any] = None
     abort_lock: threading.Lock = field(default_factory=threading.Lock)
     now_fn: Callable[[], float] = time.time
     last_snapshot_sig: Optional[str] = None
     last_snapshot_at: Optional[float] = None
     last_progress_notified_at: Optional[float] = None
     last_progress_notified_sig: Optional[tuple] = None
+
+
+def _safe_steer(rt: Any, text: str) -> None:
+    """Steer text into a live task's transport; no-op when it is not up yet."""
+    transport = getattr(rt, "transport", None)
+    if transport is None:
+        return
+    transport.send_steer(text)
 
 
 class PiManager:
@@ -756,6 +765,19 @@ class PiManager:
                            now_fn=self._now)
         with self._runtimes_lock:
             self._runtimes[task_id] = rt
+        # Live LSP feedback: tail the session file and steer fresh diagnostics
+        # back into the task while it still runs. Best-effort by construction.
+        try:
+            pump = lsp_feedback.LspFeedbackPump(
+                task_id=task_id, cwd=cwd, session_file=session_file,
+                steer=lambda text: _safe_steer(rt, text),
+                record=lambda summary: self._record_event(
+                    task_id, "lsp", "feedback", None, None, summary=summary),
+            )
+            pump.start()
+            rt.lsp_feedback = pump
+        except Exception:  # noqa: BLE001 - feedback must never break dispatch
+            logger.debug("pi-manager: lsp feedback pump unavailable", exc_info=True)
 
         thread = threading.Thread(
             target=self._boot_and_run,
@@ -1340,6 +1362,12 @@ class PiManager:
                 row.get("last_state_hash"), row.get("message_count"),
                 row.get("last_event_type"))
 
+    def _stop_feedback(self, task_id: str) -> None:
+        """Stop the live LSP pump once the task is terminal."""
+        rt = self._rt(task_id)
+        if rt is not None and rt.lsp_feedback is not None:
+            rt.lsp_feedback.stop()
+
     def _run_verifier(self, task_id: str) -> None:
         """The terminal step: semantic check, then the gate, then the notice.
 
@@ -1348,6 +1376,7 @@ class PiManager:
         deliberately independent of the gate: a task with no verifier is
         exactly the case where a type error would otherwise ship unnoticed.
         """
+        self._stop_feedback(task_id)
         self._run_lsp_check(task_id)
         rt = self._rt(task_id)
         try:
@@ -1979,6 +2008,7 @@ class PiManager:
                         transport.wait(timeout=thresholds.terminate_grace_seconds)
 
         self._stop_watchdog(task_id)
+        self._stop_feedback(task_id)
         exit_code = rt.transport.poll() if (rt and rt.transport) else None
         self._set_execution_state(
             task_id, EXEC_ABORTED, exit_code=exit_code,
